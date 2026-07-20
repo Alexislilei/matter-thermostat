@@ -4856,6 +4856,12 @@
 		(uuid "3c19b8c4-4fa5-4805-b1d2-47b62aedbb27")
 	)
 	(junction
+		(at 218.44 99.06)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "3da6b7f4-af1a-4a49-823d-08a14adf27e6")
+	)
+	(junction
 		(at 273.05 67.31)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -4946,6 +4952,12 @@
 		(uuid "be6eff6e-abb3-417e-87e6-a29feffab14a")
 	)
 	(junction
+		(at 228.6 85.09)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "c3298c9d-d7ab-44de-9a04-9a664fd470f0")
+	)
+	(junction
 		(at 134.62 38.1)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -5014,6 +5026,16 @@
 			(type default)
 		)
 		(uuid "08b0cd96-fb9c-4448-abe4-b3836c9ce1bc")
+	)
+	(wire
+		(pts
+			(xy 232.41 99.06) (xy 232.41 90.17)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "0cbb7bc4-1a35-4caa-b04a-d2259e5abe70")
 	)
 	(wire
 		(pts
@@ -5117,6 +5139,16 @@
 	)
 	(wire
 		(pts
+			(xy 218.44 99.06) (xy 232.41 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2374f311-a2d7-45a4-84ec-f47a694233e4")
+	)
+	(wire
+		(pts
 			(xy 123.19 170.18) (xy 123.19 167.64)
 		)
 		(stroke
@@ -5194,6 +5226,16 @@
 			(type default)
 		)
 		(uuid "37204b4b-c3a8-4a80-a744-678043264060")
+	)
+	(wire
+		(pts
+			(xy 218.44 87.63) (xy 218.44 85.09)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "3737c6ea-d49a-4450-86f0-4bece3f746f2")
 	)
 	(wire
 		(pts
@@ -5277,16 +5319,6 @@
 	)
 	(wire
 		(pts
-			(xy 215.9 55.88) (xy 215.9 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "43bd0d17-8db6-4d10-9b5e-94f71ee723cb")
-	)
-	(wire
-		(pts
 			(xy 270.51 77.47) (xy 273.05 77.47)
 		)
 		(stroke
@@ -5344,6 +5376,16 @@
 			(type default)
 		)
 		(uuid "528979e0-186c-43eb-9fca-053a8dc9a4e9")
+	)
+	(wire
+		(pts
+			(xy 214.63 43.18) (xy 214.63 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "5534fead-6d09-429a-80e2-c636b8b74f9f")
 	)
 	(wire
 		(pts
@@ -5444,16 +5486,6 @@
 			(type default)
 		)
 		(uuid "64d484f7-0ac0-4ccd-b889-2154277cbb97")
-	)
-	(wire
-		(pts
-			(xy 205.74 55.88) (xy 215.9 55.88)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "6688a3ff-872e-4d11-9d58-251be8955c84")
 	)
 	(wire
 		(pts
@@ -5707,6 +5739,16 @@
 	)
 	(wire
 		(pts
+			(xy 218.44 85.09) (xy 228.6 85.09)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "8853ca98-070a-4066-8f4e-1376d8dd2674")
+	)
+	(wire
+		(pts
 			(xy 153.67 152.4) (xy 153.67 153.67)
 		)
 		(stroke
@@ -5834,16 +5876,6 @@
 			(type default)
 		)
 		(uuid "9768938d-9f5b-4b35-b424-2ca7a2b12bed")
-	)
-	(wire
-		(pts
-			(xy 232.41 97.79) (xy 232.41 90.17)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "98710fd0-c5f8-407c-9bd1-2f24cd5ed775")
 	)
 	(wire
 		(pts
@@ -6177,6 +6209,16 @@
 	)
 	(wire
 		(pts
+			(xy 218.44 95.25) (xy 218.44 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d8cc4701-735e-4da5-8ec9-f6f5425e5fdc")
+	)
+	(wire
+		(pts
 			(xy 144.78 152.4) (xy 153.67 152.4)
 		)
 		(stroke
@@ -6247,7 +6289,7 @@
 	)
 	(wire
 		(pts
-			(xy 215.9 97.79) (xy 232.41 97.79)
+			(xy 214.63 99.06) (xy 218.44 99.06)
 		)
 		(stroke
 			(width 0)
@@ -6284,6 +6326,16 @@
 			(type default)
 		)
 		(uuid "e753f307-255b-452b-8acb-0cb091a37383")
+	)
+	(wire
+		(pts
+			(xy 214.63 43.18) (xy 205.74 43.18)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "eb390bea-6732-4767-806d-6f693bf08c6c")
 	)
 	(wire
 		(pts
@@ -6606,7 +6658,7 @@
 		(uuid "b96a94a3-eac3-4a96-a8c8-0a87882de9e6")
 	)
 	(label "HEATER"
-		(at 217.17 97.79 0)
+		(at 224.79 99.06 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -7118,6 +7170,88 @@
 			(project "thermostat-hardware"
 				(path "/3528b60d-1aad-4163-b1f0-ebe37a9f4906"
 					(reference "#PWR017")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 218.44 91.44 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "3b14338c-46d3-4389-8617-fd259ef71249")
+		(property "Reference" "R12"
+			(at 220.98 90.1699 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "10k"
+			(at 220.98 92.7099 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal"
+			(at 216.662 91.44 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 218.44 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 218.44 91.44 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "9f75863c-6c94-4a98-bd13-2169e66c88c3")
+		)
+		(pin "1"
+			(uuid "e5bcb0f7-40a7-4d4b-8e9e-65cce668cc84")
+		)
+		(instances
+			(project "thermostat-hardware"
+				(path "/3528b60d-1aad-4163-b1f0-ebe37a9f4906"
+					(reference "R12")
 					(unit 1)
 				)
 			)
@@ -9299,7 +9433,6 @@
 		(on_board yes)
 		(in_pos_files yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "a0a02350-de51-4945-b446-e17a14e16159")
 		(property "Reference" "#PWR09"
 			(at 228.6 96.52 0)
@@ -9313,7 +9446,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 228.6 95.25 0)
+			(at 228.854 93.98 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
