@@ -1,6 +1,46 @@
-# 忽略 Windows WSL Zone 安全标识文件
-*:Zone.Identifier
+# ESP-IDF 构建产物与临时目录
+build/
+managed_components/
+sdkconfig.old
+sdkconfig.ci
 
-# 忽略其他可能出现的 identifier 文件
+# C/C++ 编译产物与镜像文件
+*.o
+*.elf
+*.bin
+*.map
+*.a
+*.so
+*.dylib
+
+# CMake 临时生成文件（若在源码树中生成）
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Python 脚本编译与虚拟环境缓存（ESP-IDF 构建系统依赖）
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# IDE 与编辑器配置文件/缓存
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/c_cpp_properties.json
+.idea/
+*.swp
+*.swo
+*~
+.clangd/
+
+# 操作系统与文件系统临时文件 (如 Windows WSL Zone 标识)
+*:Zone.Identifier
 *.identifier
 *.Identifier
+.DS_Store
+Thumbs.db
