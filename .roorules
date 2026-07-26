@@ -3,7 +3,7 @@
 ## 1. 项目结构指南
 * 需求与架构文档：固定保存在 `docs/` 目录下。
   * `docs/01_requirements.md`: 需求说明
-  * `docs/02_architecture.md`: 系统架构设计
+  
 * 源码目录：`main/`，硬件驱动与组件放在 `components/`。
 
 ## 2. 工作工作流 (Workflow)
