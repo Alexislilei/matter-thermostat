@@ -111,8 +111,8 @@ void button_handler_poll(void) {
         if (s_btn_up.press_time_ms > 0) {
             int64_t duration = now_ms - s_btn_up.press_time_ms;
             if (duration >= 50) {
-                // 增加 1 摄氏度 (上限 21℃)
-                thermostat_set_target_temperature(s_thermostat, s_thermostat->target_temp + 1);
+                // 增加 1 摄氏度 (上限 25℃)
+                thermostat_set_target_temperature(s_thermostat, s_thermostat->target_temp + 1.0f);
             }
             s_btn_up.press_time_ms = 0;
         }
@@ -133,8 +133,8 @@ void button_handler_poll(void) {
         if (s_btn_down.press_time_ms > 0) {
             int64_t duration = now_ms - s_btn_down.press_time_ms;
             if (!s_btn_down.long_pressed && duration >= 50) {
-                // 短按：减少 1 摄氏度 (下限 17℃)
-                thermostat_set_target_temperature(s_thermostat, s_thermostat->target_temp - 1);
+                // 短按：减少 1 摄氏度 (下限 15℃)
+                thermostat_set_target_temperature(s_thermostat, s_thermostat->target_temp - 1.0f);
             }
             s_btn_down.press_time_ms = 0;
             s_btn_down.long_pressed = false;

@@ -18,6 +18,28 @@ esp_err_t app_matter_init(thermostat_dev_t *dev);
  */
 void app_matter_update(const thermostat_dev_t *dev);
 
+/**
+ * @brief 由设备侧主动切换模式时（如按键）调用，将 SystemMode 同步至 Matter。
+ *        使用 attribute::set_val 直接写入属性存储，不经过 Matter 写入验证路径。
+ */
+void app_matter_set_mode(thermostat_mode_t mode);
+
+/**
+ * @brief 由设备侧主动改变目标温度时（如按键加减温）调用，
+ *        将 OccupiedHeatingSetpoint 同步至 Matter 属性层。
+ *        使用 attribute::set_val 直接写入属性存储，不经过 Matter 写入验证路径。
+ * @param target_temp_celsius 目标温度，单位摄氏度
+ */
+void app_matter_set_target_temperature(float target_temp_celsius);
+
+/**
+ * @brief 标记当前模式变化是否来自 Matter 回调，用于 button_poll_task
+ *        避免将本地变化回写 Matter 时产生冗余写入。
+ *        true  = 变化来自 Matter 回调，button_poll_task 跳过回写
+ *        false = 变化来自本地按键，button_poll_task 执行回写
+ */
+extern bool g_mode_change_from_matter;
+
 #ifdef __cplusplus
 }
 #endif

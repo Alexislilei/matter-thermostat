@@ -6,7 +6,7 @@ static const char *TAG = "THERMOSTAT_LOGIC";
 esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     if (!dev) return ESP_ERR_INVALID_ARG;
     dev->heater_gpio = heater_gpio;
-    dev->target_temp = 19;      // 默认设定 19 摄氏度
+    dev->target_temp = 20.0f;   // 默认设定 20.0 摄氏度
     dev->current_temp = 20.0f;
     dev->mode = THERMOSTAT_MODE_STANDBY;
     dev->is_heating = false;
@@ -36,12 +36,12 @@ void thermostat_set_mode(thermostat_dev_t *dev, thermostat_mode_t mode) {
     }
 }
 
-void thermostat_set_target_temperature(thermostat_dev_t *dev, int target) {
+void thermostat_set_target_temperature(thermostat_dev_t *dev, float target) {
     if (!dev) return;
-    if (target < 17) target = 17;
-    if (target > 21) target = 21;
+    if (target < 15.0f) target = 15.0f;
+    if (target > 25.0f) target = 25.0f;
     dev->target_temp = target;
-    ESP_LOGI(TAG, "Target temperature set to: %d C", dev->target_temp);
+    ESP_LOGI(TAG, "Target temperature set to: %.2f C", dev->target_temp);
 }
 
 void thermostat_update_temperature(thermostat_dev_t *dev, float new_temp) {
@@ -58,8 +58,8 @@ void thermostat_update_temperature(thermostat_dev_t *dev, float new_temp) {
     }
 
     // 迟滞温控逻辑 (Hysteresis Control ±0.5℃)
-    float high_threshold = (float)dev->target_temp + 0.5f;
-    float low_threshold = (float)dev->target_temp - 0.5f;
+    float high_threshold = dev->target_temp + 0.5f;
+    float low_threshold  = dev->target_temp - 0.5f;
 
     if (dev->is_heating) {
         // 升温过程中：当实测温度上升至 设定温度 + 0.5 ℃ 时，关闭加热

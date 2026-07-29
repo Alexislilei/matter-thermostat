@@ -49,9 +49,35 @@ static void led_ui_task(void *pvParameters) {
 }
 
 // 3. 按键扫描与状态轮询任务 (20ms 周期)
+// 检测模式变化和目标温度变化，变化时同步至 Matter
 static void button_poll_task(void *pvParameters) {
+    thermostat_mode_t last_mode = s_thermostat.mode;
+    float last_target_temp = s_thermostat.target_temp;
+
     while (1) {
         button_handler_poll();
+
+        // 检测模式变化：按键改变模式时将 SystemMode 同步至 Matter
+        if (s_thermostat.mode != last_mode) {
+            last_mode = s_thermostat.mode;
+
+            // 如果模式变化来自 Matter 回调 (HomeKit 写入 SystemMode)，
+            // 则跳过回写，避免冗余写入和 err 258
+            if (g_mode_change_from_matter) {
+                g_mode_change_from_matter = false;
+                ESP_LOGD(TAG, "Mode change from Matter, skip write-back");
+            } else {
+                app_matter_set_mode(last_mode);
+            }
+        }
+
+        // 检测目标温度变化：按键加减温时将 OccupiedHeatingSetpoint 同步至 Matter
+        // 注意：HomeKit 写入的温度变化在回调中已处理，此处仅同步本地按键变化
+        if (s_thermostat.target_temp != last_target_temp) {
+            last_target_temp = s_thermostat.target_temp;
+            app_matter_set_target_temperature(last_target_temp);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -93,8 +119,8 @@ void app_main(void) {
 
     // 7. 创建后台并发 Task
     xTaskCreate(temp_control_task, "temp_control_task", 3072, NULL, 5, NULL);
-    xTaskCreate(led_ui_task, "led_ui_task", 3072, NULL, 4, NULL);
-    xTaskCreate(button_poll_task, "button_poll_task", 2048, NULL, 6, NULL);
+    xTaskCreate(led_ui_task,       "led_ui_task",       3072, NULL, 4, NULL);
+    xTaskCreate(button_poll_task,  "button_poll_task",  3072, NULL, 6, NULL);
 
     ESP_LOGI(TAG, "Initialization complete. Thermostat tasks running.");
 }

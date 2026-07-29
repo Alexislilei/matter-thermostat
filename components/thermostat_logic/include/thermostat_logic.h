@@ -17,7 +17,7 @@ typedef enum {
 
 typedef struct {
     gpio_num_t heater_gpio;     // GPIO22
-    int target_temp;            // 设定目标温度 (17 - 21 ℃)
+    float target_temp;          // 设定目标温度 (15.0 ~ 25.0 ℃)
     float current_temp;         // 当前滤波后的实测温度
     thermostat_mode_t mode;     // 系统运行模式
     bool is_heating;            // 当前加热器 Relay 控制状态 (HIGH/LOW)
@@ -37,9 +37,9 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio);
 void thermostat_update_temperature(thermostat_dev_t *dev, float new_temp);
 
 /**
- * @brief 调整目标设定温度（范围锁在 17 - 21 ℃）
+ * @brief 调整目标设定温度（范围锁在 15.0 ~ 25.0 ℃）
  */
-void thermostat_set_target_temperature(thermostat_dev_t *dev, int target);
+void thermostat_set_target_temperature(thermostat_dev_t *dev, float target);
 
 /**
  * @brief 设置系统模式 (STANDBY / ON / PAIRING)
