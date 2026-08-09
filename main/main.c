@@ -15,8 +15,9 @@ static const char *TAG = "MAIN";
 
 // 硬件引脚定义
 #define GPIO_POWER_BTN      GPIO_NUM_19
-#define GPIO_TEMP_DOWN_BTN  GPIO_NUM_20
-#define GPIO_TEMP_UP_BTN    GPIO_NUM_21
+#define GPIO_FUNC_BTN       GPIO_NUM_18
+#define GPIO_KEY_RA         GPIO_NUM_21
+#define GPIO_KEY_RB         GPIO_NUM_20
 #define GPIO_HEATER_RELAY   GPIO_NUM_22
 #define GPIO_DHT11_DATA     GPIO_NUM_4
 #define GPIO_RGB_LED_STRIP  GPIO_NUM_8
@@ -106,7 +107,8 @@ static void button_poll_task(void *pvParameters) {
             app_matter_set_target_temperature(last_target_temp);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        // 延迟 1 Tick (10ms) 释放 CPU 资源，防止 IDLE 任务被饿死触发 Task Watchdog (WDT)
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -131,11 +133,12 @@ void app_main(void) {
     ESP_ERROR_CHECK(led_control_init(GPIO_RGB_LED_STRIP));
     led_control_post();
 
-    // 5. 初始化按键驱动
+    // 5. 初始化按键及旋转编码器驱动
     button_config_t btn_cfg = {
         .pin_power = GPIO_POWER_BTN,
-        .pin_temp_down = GPIO_TEMP_DOWN_BTN,
-        .pin_temp_up = GPIO_TEMP_UP_BTN,
+        .pin_func = GPIO_FUNC_BTN,
+        .pin_key_ra = GPIO_KEY_RA,
+        .pin_key_rb = GPIO_KEY_RB,
     };
     ESP_ERROR_CHECK(button_handler_init(&btn_cfg, &s_thermostat));
 

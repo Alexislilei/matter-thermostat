@@ -10,13 +10,14 @@ extern "C" {
 #endif
 
 typedef struct {
-    gpio_num_t pin_power;     // GPIO19
-    gpio_num_t pin_temp_down; // GPIO20
-    gpio_num_t pin_temp_up;   // GPIO21
+    gpio_num_t pin_power;   // GPIO19 (POWER 按键)
+    gpio_num_t pin_func;    // GPIO18 (FUNC 编码器附加按键)
+    gpio_num_t pin_key_ra;  // GPIO21 (旋转编码器 A相 KEY_RA)
+    gpio_num_t pin_key_rb;  // GPIO20 (旋转编码器 B相 KEY_RB)
 } button_config_t;
 
 /**
- * @brief 初始化 GPIO 按键及去抖定时器
+ * @brief 初始化 GPIO 按键、旋钮及去抖检测
  */
 esp_err_t button_handler_init(button_config_t *cfg, thermostat_dev_t *thermostat);
 

@@ -247,41 +247,25 @@ extern "C" void app_matter_update(const thermostat_dev_t *dev) {
     // 模式切换时通过 app_matter_set_mode() 单次同步。
 }
 
-// 由设备侧主动改变目标温度时（如按键加减温）调用，将 OccupiedHeatingSetpoint 同步至 Matter。
-// 使用 attribute::set_val 直接写入属性存储，不经过 Matter 写入验证路径。
-// OccupiedHeatingSetpoint 在 Matter 规范中为 INT16 类型，使用 esp_matter_int16() 创建值。
+// 由设备侧主动改变目标温度时（如按键/旋钮加减温）调用，将 OccupiedHeatingSetpoint 同步并广播上报至 Matter 控制端 (HomeKit)。
+// 使用 attribute::update 写入属性存储并触发 Attribute Subscription Report 推送。
 extern "C" void app_matter_set_target_temperature(float target_temp_celsius) {
     if (s_thermostat_endpoint_id == 0) return;
 
     int16_t target_temp_hundredths = (int16_t)(target_temp_celsius * 100.0f);
 
-    endpoint_t *endpoint = endpoint::get(node::get(), s_thermostat_endpoint_id);
-    if (!endpoint) return;
-
-    cluster_t *thermostat_cluster = cluster::get(endpoint, Thermostat::Id);
-    if (!thermostat_cluster) return;
-
-    attribute_t *attr_setpoint = attribute::get(thermostat_cluster,
-                                                Thermostat::Attributes::OccupiedHeatingSetpoint::Id);
-    if (!attr_setpoint) {
-        ESP_LOGW(TAG, "OccupiedHeatingSetpoint attribute not found");
-        return;
-    }
-
     esp_matter_attr_val_t val = esp_matter_int16(target_temp_hundredths);
-    esp_err_t err = attribute::set_val(attr_setpoint, &val);
+    esp_err_t err = attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
+                                      Thermostat::Attributes::OccupiedHeatingSetpoint::Id, &val);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set OccupiedHeatingSetpoint to %d, err: %d", target_temp_hundredths, err);
+        ESP_LOGE(TAG, "Failed to update OccupiedHeatingSetpoint to %d, err: %d", target_temp_hundredths, err);
     } else {
-        ESP_LOGI(TAG, "OccupiedHeatingSetpoint synced to Matter: %.2f C (raw: %d)", target_temp_celsius, target_temp_hundredths);
+        ESP_LOGI(TAG, "OccupiedHeatingSetpoint updated & reported to Matter: %.2f C (raw: %d)", target_temp_celsius, target_temp_hundredths);
     }
 }
 
-// 由设备侧主动切换模式时（如按键）调用，将 SystemMode 同步至 Matter 属性层。
-// 使用 attribute::set_val 直接写入属性存储，不经过 Matter 写入验证路径。
-// SystemMode 在 Matter 规范中为 ENUM8 类型，必须使用 esp_matter_enum8() 创建值，
-// 否则 attribute::set_val 的类型检查 (get_val_type(attr) == val->type) 会失败，
-// 返回 ESP_ERR_INVALID_ARG (err 258)。
+// 由设备侧主动切换模式时（如按键切换/待机唤醒）调用，将 SystemMode 同步并广播上报至 Matter 控制端 (HomeKit)。
+// 使用 attribute::update 写入属性存储并触发 Attribute Subscription Report 推送。
 extern "C" void app_matter_set_mode(thermostat_mode_t mode) {
     if (s_thermostat_endpoint_id == 0) return;
 
@@ -289,29 +273,22 @@ extern "C" void app_matter_set_mode(thermostat_mode_t mode) {
                           ? THERMOSTAT_SYSTEM_MODE_HEAT
                           : THERMOSTAT_SYSTEM_MODE_OFF;
 
-    endpoint_t *endpoint = endpoint::get(node::get(), s_thermostat_endpoint_id);
-    if (!endpoint) return;
-
-    cluster_t *thermostat_cluster = cluster::get(endpoint, Thermostat::Id);
-    if (!thermostat_cluster) return;
-
-    attribute_t *attr_mode = attribute::get(thermostat_cluster,
-                                            Thermostat::Attributes::SystemMode::Id);
-    if (!attr_mode) {
-        ESP_LOGW(TAG, "SystemMode attribute not found");
-        return;
-    }
-
-    // SystemMode 是 ENUM8 类型，必须使用 esp_matter_enum8() 而非 esp_matter_uint8()
     esp_matter_attr_val_t val = esp_matter_enum8(system_mode);
-    esp_err_t err = attribute::set_val(attr_mode, &val);
+    esp_err_t err = attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
+                                      Thermostat::Attributes::SystemMode::Id, &val);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set SystemMode to 0x%02X, err: %d", system_mode, err);
+        ESP_LOGE(TAG, "Failed to update SystemMode to 0x%02X, err: %d", system_mode, err);
     } else {
-        ESP_LOGI(TAG, "SystemMode synced to Matter: 0x%02X (%s)",
+        ESP_LOGI(TAG, "SystemMode updated & reported to Matter: 0x%02X (%s)",
                  system_mode,
                  (mode == THERMOSTAT_MODE_ON) ? "Heat" : "Off");
     }
+
+    // 模式切换时同步更新并推送 ThermostatRunningMode (0x03 Heat / 0x00 Off) 至 HomeKit
+    uint8_t running_mode = (mode == THERMOSTAT_MODE_ON) ? 0x03 : 0x00;
+    esp_matter_attr_val_t val_running_mode = esp_matter_enum8(running_mode);
+    attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
+                      Thermostat::Attributes::ThermostatRunningMode::Id, &val_running_mode);
 }
 
 extern "C" bool app_matter_check_commissioning_timeout(thermostat_dev_t *dev) {
