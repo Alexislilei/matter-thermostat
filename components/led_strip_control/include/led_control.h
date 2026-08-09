@@ -37,6 +37,14 @@ void led_control_post(void);
  */
 void led_control_update(const thermostat_dev_t *dev);
 
+/**
+ * @brief 检查瞬态灯效是否已播放完毕
+ *        调用方在灯效播放完毕后可执行后续操作（如重启设备）
+ * @param dev 设备状态指针
+ * @return true 瞬态灯效已结束，false 仍在播放中
+ */
+bool led_control_effect_finished(const thermostat_dev_t *dev);
+
 #ifdef __cplusplus
 }
 #endif

@@ -40,6 +40,20 @@ void app_matter_set_target_temperature(float target_temp_celsius);
  */
 extern bool g_mode_change_from_matter;
 
+/**
+ * @brief 检查配网是否已超时 (15 分钟)
+ *        若超时，自动退出配网模式并触发配网失败灯效
+ * @param dev 温控器设备指针
+ * @return true 已超时并已处理，false 未超时或不在配网模式
+ */
+bool app_matter_check_commissioning_timeout(thermostat_dev_t *dev);
+
+/**
+ * @brief 执行 Matter 恢复出厂设置：清空 Matter 节点凭证
+ *        调用后设备需重启以重新进入配网模式
+ */
+void app_matter_factory_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

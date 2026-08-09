@@ -23,6 +23,9 @@ static button_state_t s_btn_up;
 static int64_t s_combo_press_time_ms = 0;
 static bool s_combo_triggered = false;
 
+// 电源键长按 10 秒恢复出厂设置标记
+static bool s_power_factory_reset_triggered = false;
+
 static void init_single_btn(button_state_t *btn, gpio_num_t pin) {
     btn->pin = pin;
     btn->last_state = true;
@@ -47,6 +50,8 @@ esp_err_t button_handler_init(button_config_t *cfg, thermostat_dev_t *thermostat
     init_single_btn(&s_btn_power, cfg->pin_power);
     init_single_btn(&s_btn_down, cfg->pin_temp_down);
     init_single_btn(&s_btn_up, cfg->pin_temp_up);
+
+    s_power_factory_reset_triggered = false;
 
     return ESP_OK;
 }
@@ -87,13 +92,26 @@ void button_handler_poll(void) {
     }
 
     // 2. 电源键逻辑 (GPIO19)
+    //    短按 (< 10s)：待机/开机切换
+    //    长按 (>= 10s)：恢复出厂设置
     if (raw_pwr) {
-        if (s_btn_power.press_time_ms == 0) s_btn_power.press_time_ms = now_ms;
+        if (s_btn_power.press_time_ms == 0) {
+            s_btn_power.press_time_ms = now_ms;
+            s_btn_power.long_pressed = false;
+            s_power_factory_reset_triggered = false;
+        } else if (!s_btn_power.long_pressed && !s_power_factory_reset_triggered &&
+                   (now_ms - s_btn_power.press_time_ms >= 10000)) {
+            // 长按超过 10 秒：触发恢复出厂设置
+            s_power_factory_reset_triggered = true;
+            s_btn_power.long_pressed = true;
+            ESP_LOGI(TAG, "Power button 10s hold -> Factory Reset");
+            thermostat_factory_reset(s_thermostat);
+        }
     } else {
         if (s_btn_power.press_time_ms > 0) {
             int64_t duration = now_ms - s_btn_power.press_time_ms;
-            if (duration >= 50 && duration < 3000) {
-                // 短按/长按：在“待机模式”与“开机模式”之间切换
+            if (!s_btn_power.long_pressed && duration >= 50 && duration < 10000) {
+                // 短按：在"待机模式"与"开机模式"之间切换
                 if (s_thermostat->mode == THERMOSTAT_MODE_ON) {
                     thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_STANDBY);
                 } else {
@@ -101,6 +119,7 @@ void button_handler_poll(void) {
                 }
             }
             s_btn_power.press_time_ms = 0;
+            s_btn_power.long_pressed = false;
         }
     }
 

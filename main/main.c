@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 
 #include "dht11.h"
@@ -24,10 +25,12 @@ static thermostat_dev_t s_thermostat;
 static dht11_config_t s_dht11;
 
 // 1. 温度采集与控制任务 (2 秒周期)
+//    同时负责配网超时检测和瞬态灯效完成后的后续处理
 static void temp_control_task(void *pvParameters) {
     float temp_val = 0.0f;
 
     while (1) {
+        // ---- 温度采集与温控 ----
         esp_err_t err = dht11_read_filtered(&s_dht11, &temp_val);
         if (err == ESP_OK) {
             ESP_LOGI(TAG, "Read Filtered Temperature: %.1f C", temp_val);
@@ -36,6 +39,31 @@ static void temp_control_task(void *pvParameters) {
         } else {
             ESP_LOGW(TAG, "Failed to read temperature from DHT11: %d", err);
         }
+
+        // ---- 配网超时检测 ----
+        app_matter_check_commissioning_timeout(&s_thermostat);
+
+        // ---- 瞬态 LED 灯效完成后的清理 ----
+        // 当 led_control 播放完瞬态灯效后，清零 pending_led_effect 标记
+        if (s_thermostat.pending_led_effect != LED_EFFECT_NONE &&
+            led_control_effect_finished(&s_thermostat)) {
+
+            led_effect_type_t finished_effect = s_thermostat.pending_led_effect;
+            s_thermostat.pending_led_effect = LED_EFFECT_NONE;
+
+            ESP_LOGI(TAG, "LED effect finished: %d", (int)finished_effect);
+
+            // 恢复出厂灯效播放完毕后，执行 Matter 出厂重置并重启
+            if (finished_effect == LED_EFFECT_FACTORY_RESET) {
+                ESP_LOGI(TAG, "Factory reset LED effect complete. Clearing Matter credentials...");
+                app_matter_factory_reset();
+                // 短暂延迟确保日志输出
+                vTaskDelay(pdMS_TO_TICKS(500));
+                ESP_LOGI(TAG, "Rebooting device...");
+                esp_restart();
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
@@ -118,7 +146,7 @@ void app_main(void) {
     thermostat_set_mode(&s_thermostat, THERMOSTAT_MODE_ON);
 
     // 7. 创建后台并发 Task
-    xTaskCreate(temp_control_task, "temp_control_task", 3072, NULL, 5, NULL);
+    xTaskCreate(temp_control_task, "temp_control_task", 4096, NULL, 5, NULL);
     xTaskCreate(led_ui_task,       "led_ui_task",       3072, NULL, 4, NULL);
     xTaskCreate(button_poll_task,  "button_poll_task",  3072, NULL, 6, NULL);
 

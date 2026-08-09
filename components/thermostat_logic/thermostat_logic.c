@@ -1,5 +1,6 @@
 #include "thermostat_logic.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "THERMOSTAT_LOGIC";
 
@@ -10,6 +11,8 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     dev->current_temp = 20.0f;
     dev->mode = THERMOSTAT_MODE_STANDBY;
     dev->is_heating = false;
+    dev->pending_led_effect = LED_EFFECT_NONE;
+    dev->pairing_start_time_ms = 0;
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << heater_gpio),
@@ -26,6 +29,15 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
 void thermostat_set_mode(thermostat_dev_t *dev, thermostat_mode_t mode) {
     if (!dev) return;
     dev->mode = mode;
+
+    // 记录配网开始时间，用于 15 分钟超时检测
+    if (mode == THERMOSTAT_MODE_PAIRING) {
+        dev->pairing_start_time_ms = esp_timer_get_time() / 1000;
+        ESP_LOGI(TAG, "Entered PAIRING mode, 15-minute timeout started.");
+    } else {
+        dev->pairing_start_time_ms = 0;
+    }
+
     // 若进入待机模式，强行关闭加热器
     if (mode == THERMOSTAT_MODE_STANDBY) {
         dev->is_heating = false;
@@ -76,4 +88,25 @@ void thermostat_update_temperature(thermostat_dev_t *dev, float new_temp) {
             ESP_LOGI(TAG, "Temp dropped to %.2f <= %.2f C, Turning ON Heater", dev->current_temp, low_threshold);
         }
     }
+}
+
+void thermostat_factory_reset(thermostat_dev_t *dev) {
+    if (!dev) return;
+
+    ESP_LOGI(TAG, "=== FACTORY RESET TRIGGERED ===");
+
+    // 关闭加热器
+    dev->is_heating = false;
+    gpio_set_level(dev->heater_gpio, 0);
+
+    // 恢复默认状态
+    dev->target_temp = 20.0f;
+    dev->current_temp = 20.0f;
+    dev->mode = THERMOSTAT_MODE_STANDBY;
+    dev->pairing_start_time_ms = 0;
+
+    // 请求播放恢复出厂灯效
+    dev->pending_led_effect = LED_EFFECT_FACTORY_RESET;
+
+    ESP_LOGI(TAG, "Factory reset complete. LED effect queued, reboot pending.");
 }

@@ -1,5 +1,6 @@
 #include "app_matter.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <esp_matter.h>
 #include <esp_matter_console.h>
 #include <esp_matter_ota.h>
@@ -17,6 +18,9 @@ static uint16_t s_thermostat_endpoint_id = 0;
 // 0x00 = Off (待机), 0x04 = Heat (加热运行)
 #define THERMOSTAT_SYSTEM_MODE_OFF  0x00
 #define THERMOSTAT_SYSTEM_MODE_HEAT 0x04
+
+// 配网超时时间：15 分钟 (单位：毫秒)
+#define COMMISSIONING_TIMEOUT_MS (15 * 60 * 1000)
 
 // 标记当前模式变化是否来自 Matter 回调，用于 button_poll_task
 // 避免将本地变化回写 Matter 时产生冗余写入
@@ -308,4 +312,34 @@ extern "C" void app_matter_set_mode(thermostat_mode_t mode) {
                  system_mode,
                  (mode == THERMOSTAT_MODE_ON) ? "Heat" : "Off");
     }
+}
+
+extern "C" bool app_matter_check_commissioning_timeout(thermostat_dev_t *dev) {
+    if (!dev) return false;
+    if (dev->mode != THERMOSTAT_MODE_PAIRING) return false;
+    if (dev->pairing_start_time_ms == 0) return false;
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    int64_t elapsed_ms = now_ms - dev->pairing_start_time_ms;
+
+    if (elapsed_ms >= COMMISSIONING_TIMEOUT_MS) {
+        ESP_LOGI(TAG, "Commissioning timeout (15 min) reached. Exiting pairing mode.");
+        // 触发配网失败灯效
+        dev->pending_led_effect = LED_EFFECT_COMMISSIONING_FAIL;
+        // 退出配网模式，回到待机
+        thermostat_set_mode(dev, THERMOSTAT_MODE_STANDBY);
+        return true;
+    }
+
+    return false;
+}
+
+extern "C" void app_matter_factory_reset(void) {
+    ESP_LOGI(TAG, "=== Matter Factory Reset: Clearing all credentials ===");
+
+    // 调用 ESP Matter SDK 的出厂重置 API
+    // 这会清除所有 Matter 节点凭证、Wi-Fi 配置及生态绑定关系
+    esp_matter::factory_reset();
+
+    ESP_LOGI(TAG, "Matter factory reset complete. Device will reboot.");
 }
