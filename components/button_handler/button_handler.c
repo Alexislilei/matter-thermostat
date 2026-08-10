@@ -11,15 +11,13 @@ static thermostat_dev_t *s_thermostat = NULL;
 
 typedef struct {
     gpio_num_t pin;
-    int64_t press_time_ms;  // 按下起始时刻
-    bool long_pressed;      // 是否已触发长按或已消费
+    int64_t press_time_ms;     // 按下起始时刻
+    bool pairing_triggered;     // 是否已触发 >5s 配网模式
+    bool reset_triggered;       // 是否已触发 >15s 恢复出厂设置
 } button_state_t;
 
 static button_state_t s_btn_power;
 static button_state_t s_btn_func;
-
-static int64_t s_combo_press_time_ms = 0;
-static bool s_combo_triggered = false;
 
 static uint8_t s_last_ra_level = 1;
 static int64_t s_last_encoder_time_ms = 0;
@@ -27,7 +25,8 @@ static int64_t s_last_encoder_time_ms = 0;
 static void init_single_btn(button_state_t *btn, gpio_num_t pin) {
     btn->pin = pin;
     btn->press_time_ms = 0;
-    btn->long_pressed = false;
+    btn->pairing_triggered = false;
+    btn->reset_triggered = false;
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << pin),
@@ -59,9 +58,6 @@ esp_err_t button_handler_init(button_config_t *cfg, thermostat_dev_t *thermostat
 
     s_last_ra_level = gpio_get_level(cfg->pin_key_ra);
     s_last_encoder_time_ms = 0;
-
-    s_combo_press_time_ms = 0;
-    s_combo_triggered = false;
 
     return ESP_OK;
 }
@@ -110,76 +106,59 @@ void button_handler_poll(void) {
         }
     }
 
-    // 2. 组合键检测 (FUNC GPIO18 + POWER GPIO19 同时长按 > 3 秒)
-    if (raw_pwr && raw_func) {
-        if (s_combo_press_time_ms == 0) {
-            s_combo_press_time_ms = now_ms;
-            s_combo_triggered = false;
-        } else if (!s_combo_triggered && (now_ms - s_combo_press_time_ms >= 3000)) {
-            s_combo_triggered = true;
-            ESP_LOGI(TAG, "Combo key (FUNC + POWER) 3s hold -> Factory Reset");
-            thermostat_factory_reset(s_thermostat);
-        }
-        // 组合键生效期间屏蔽单键触发
-        s_btn_power.long_pressed = true;
-        s_btn_func.long_pressed = true;
-        return;
-    } else {
-        s_combo_press_time_ms = 0;
-        if (s_combo_triggered) {
-            if (!raw_pwr && !raw_func) {
-                s_combo_triggered = false;
-            }
-            return;
-        }
-    }
-
-    // 3. POWER 按键逻辑 (GPIO19)
-    //    短按：待机/开机切换；长按 (>= 5s)：触发 Matter 重新配网模式
+    // 2. POWER 按键逻辑 (GPIO19)
+    //    按下 < 1s：待机/开机切换；按住 > 5s：进入配对模式；按住 > 15s：恢复出厂设置
     if (raw_pwr) {
         if (s_btn_power.press_time_ms == 0) {
             s_btn_power.press_time_ms = now_ms;
-            s_btn_power.long_pressed = false;
-        } else if (!s_btn_power.long_pressed && (now_ms - s_btn_power.press_time_ms >= 5000)) {
-            s_btn_power.long_pressed = true;
-            ESP_LOGI(TAG, "Power button 5s hold -> Trigger Matter Pairing Mode");
-            thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_PAIRING);
+            s_btn_power.pairing_triggered = false;
+            s_btn_power.reset_triggered = false;
+        } else {
+            int64_t hold_time = now_ms - s_btn_power.press_time_ms;
+            if (!s_btn_power.reset_triggered && hold_time >= 15000) {
+                s_btn_power.reset_triggered = true;
+                ESP_LOGI(TAG, "Power button 15s hold -> Trigger Factory Reset");
+                thermostat_factory_reset(s_thermostat);
+            } else if (!s_btn_power.pairing_triggered && !s_btn_power.reset_triggered && hold_time >= 5000) {
+                s_btn_power.pairing_triggered = true;
+                ESP_LOGI(TAG, "Power button 5s hold -> Trigger Matter Pairing Mode");
+                thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_PAIRING);
+            }
         }
     } else {
         if (s_btn_power.press_time_ms > 0) {
             int64_t duration = now_ms - s_btn_power.press_time_ms;
-            if (!s_btn_power.long_pressed && duration >= 50 && duration < 5000) {
+            if (!s_btn_power.pairing_triggered && !s_btn_power.reset_triggered && duration >= 50 && duration < 1000) {
                 if (s_thermostat->mode == THERMOSTAT_MODE_STANDBY) {
-                    ESP_LOGI(TAG, "Power short press -> Wake up from STANDBY");
+                    ESP_LOGI(TAG, "Power short press (<1s) -> Wake up from STANDBY");
                     thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_ON);
                 } else {
-                    ESP_LOGI(TAG, "Power short press -> Enter STANDBY");
+                    ESP_LOGI(TAG, "Power short press (<1s) -> Enter STANDBY");
                     thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_STANDBY);
                 }
             }
             s_btn_power.press_time_ms = 0;
-            s_btn_power.long_pressed = false;
+            s_btn_power.pairing_triggered = false;
+            s_btn_power.reset_triggered = false;
         }
     }
 
-    // 4. FUNC 按键逻辑 (GPIO18)
+    // 3. FUNC 按键逻辑 (GPIO18)
     //    待机下短按唤醒设备
     if (raw_func) {
         if (s_btn_func.press_time_ms == 0) {
             s_btn_func.press_time_ms = now_ms;
-            s_btn_func.long_pressed = false;
         }
     } else {
         if (s_btn_func.press_time_ms > 0) {
             int64_t duration = now_ms - s_btn_func.press_time_ms;
-            if (!s_btn_func.long_pressed && duration >= 50) {
+            if (duration >= 50) {
                 if (s_thermostat->mode == THERMOSTAT_MODE_STANDBY) {
                     ESP_LOGI(TAG, "FUNC short press -> Wake up from STANDBY");
                     thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_ON);
                 }
             }
             s_btn_func.press_time_ms = 0;
-            s_btn_func.long_pressed = false;
         }
     }
 }
