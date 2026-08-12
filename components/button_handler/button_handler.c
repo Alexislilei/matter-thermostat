@@ -67,6 +67,17 @@ void button_handler_poll(void) {
 
     int64_t now_ms = esp_timer_get_time() / 1000;
 
+    // 非主页面 60 秒无操作超时：自动保存当前设置并返回主页面
+    if (s_thermostat->mode == THERMOSTAT_MODE_ON &&
+        s_thermostat->current_page != UI_PAGE_MAIN &&
+        s_thermostat->last_input_time_ms > 0) {
+        if (now_ms - s_thermostat->last_input_time_ms >= 60000) {
+            ESP_LOGI(TAG, "60s timeout on non-main page -> Back to MAIN page");
+            s_thermostat->current_page = UI_PAGE_MAIN;
+            s_thermostat->last_input_time_ms = 0;
+        }
+    }
+
     bool raw_pwr  = (gpio_get_level(s_cfg.pin_power) == 0);
     bool raw_func = (gpio_get_level(s_cfg.pin_func) == 0);
 
@@ -92,16 +103,38 @@ void button_handler_poll(void) {
 
     // 旋转编码器触发响应
     if (encoder_direction != 0) {
+        // 记录操作时间，用于非主页面 60s 超时返回
+        s_thermostat->last_input_time_ms = now_ms;
+
         if (s_thermostat->mode == THERMOSTAT_MODE_STANDBY) {
             ESP_LOGI(TAG, "Encoder rotated -> Wake up from STANDBY");
             thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_ON);
         } else if (s_thermostat->mode == THERMOSTAT_MODE_ON) {
-            if (encoder_direction > 0) {
-                ESP_LOGI(TAG, "Encoder CW -> Target temp +1");
-                thermostat_set_target_temperature(s_thermostat, s_thermostat->target_temp + 1.0f);
+            if (s_thermostat->current_page == UI_PAGE_SLEEP_TIMER) {
+                // Sleep Timer 设置页面：循环选择睡眠时间 (OFF -> 10 -> 30 -> 60 MIN)
+                static const int sleep_options[] = {0, 10, 30, 60};
+                const int num_options = sizeof(sleep_options) / sizeof(sleep_options[0]);
+
+                int idx = 0;
+                for (int i = 0; i < num_options; i++) {
+                    if (s_thermostat->sleep_timer_setting == sleep_options[i]) {
+                        idx = i;
+                        break;
+                    }
+                }
+                // 顺时针 +1，逆时针 -1，循环切换
+                idx = (idx + encoder_direction + num_options) % num_options;
+                s_thermostat->sleep_timer_setting = sleep_options[idx];
+                ESP_LOGI(TAG, "Sleep Timer option selected: %d MIN", s_thermostat->sleep_timer_setting);
             } else {
-                ESP_LOGI(TAG, "Encoder CCW -> Target temp -1");
-                thermostat_set_target_temperature(s_thermostat, s_thermostat->target_temp - 1.0f);
+                // 主页面：调整目标温度
+                if (encoder_direction > 0) {
+                    ESP_LOGI(TAG, "Encoder CW -> Target temp +1");
+                    thermostat_set_target_temperature(s_thermostat, s_thermostat->target_temp + 1.0f);
+                } else {
+                    ESP_LOGI(TAG, "Encoder CCW -> Target temp -1");
+                    thermostat_set_target_temperature(s_thermostat, s_thermostat->target_temp - 1.0f);
+                }
             }
         }
     }
@@ -144,7 +177,7 @@ void button_handler_poll(void) {
     }
 
     // 3. FUNC 按键逻辑 (GPIO18)
-    //    待机下短按唤醒设备
+    //    待机下短按唤醒设备；开机下短按循环切换页面 (主页面 <-> Sleep Timer 设置页)
     if (raw_func) {
         if (s_btn_func.press_time_ms == 0) {
             s_btn_func.press_time_ms = now_ms;
@@ -156,6 +189,30 @@ void button_handler_poll(void) {
                 if (s_thermostat->mode == THERMOSTAT_MODE_STANDBY) {
                     ESP_LOGI(TAG, "FUNC short press -> Wake up from STANDBY");
                     thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_ON);
+                } else if (s_thermostat->mode == THERMOSTAT_MODE_ON) {
+                    // 记录操作时间，用于非主页面 60s 超时返回
+                    s_thermostat->last_input_time_ms = now_ms;
+
+                    if (s_thermostat->current_page == UI_PAGE_MAIN) {
+                        // 主页面 -> Sleep Timer 设置页
+                        s_thermostat->current_page = UI_PAGE_SLEEP_TIMER;
+                        ESP_LOGI(TAG, "FUNC press -> Enter SLEEP TIMER SETTING page");
+                    } else {
+                        // Sleep Timer 设置页 -> 主页面，确认选择并开始倒计时
+                        s_thermostat->current_page = UI_PAGE_MAIN;
+                        if (s_thermostat->sleep_timer_setting > 0) {
+                            s_thermostat->sleep_timer_active = true;
+                            s_thermostat->sleep_timer_start_ms = now_ms;
+                            ESP_LOGI(TAG, "Sleep Timer confirmed: %d MIN countdown started",
+                                     s_thermostat->sleep_timer_setting);
+                        } else {
+                            // OFF：取消定时
+                            s_thermostat->sleep_timer_active = false;
+                            s_thermostat->sleep_timer_start_ms = 0;
+                            ESP_LOGI(TAG, "Sleep Timer set to OFF (disabled)");
+                        }
+                        ESP_LOGI(TAG, "FUNC press -> Back to MAIN page");
+                    }
                 }
             }
             s_btn_func.press_time_ms = 0;

@@ -16,6 +16,14 @@ typedef enum {
 } thermostat_mode_t;
 
 /**
+ * @brief UI 页面枚举
+ */
+typedef enum {
+    UI_PAGE_MAIN        = 0, // 主页面
+    UI_PAGE_SLEEP_TIMER = 1, // Sleep Timer 设置页
+} ui_page_t;
+
+/**
  * @brief 瞬态 LED 灯效类型枚举
  *        用于指示 led_control 当前需要播放的一次性灯效序列
  */
@@ -45,6 +53,15 @@ typedef struct {
      * 0 表示未在配网模式或未开始计时
      */
     int64_t pairing_start_time_ms;
+
+    // ---- UI 页面管理 ----
+    ui_page_t current_page;       // 当前显示页面
+    int64_t last_input_time_ms;   // 最后一次操作时间戳 (ms)，用于非主页面 60s 超时返回
+
+    // ---- Sleep Timer 定时睡眠 ----
+    int sleep_timer_setting;      // 设定值 (0=OFF, 10, 30, 60 分钟)
+    bool sleep_timer_active;      // 是否正在倒计时
+    int64_t sleep_timer_start_ms; // 倒计时开始时间戳 (ms)
 } thermostat_dev_t;
 
 /**
@@ -75,6 +92,12 @@ void thermostat_set_mode(thermostat_dev_t *dev, thermostat_mode_t mode);
  *        调用方应在灯效播放完毕后重启设备
  */
 void thermostat_factory_reset(thermostat_dev_t *dev);
+
+/**
+ * @brief Sleep Timer 倒计时检测，建议每 2 秒调用一次
+ *        倒计时结束后自动切换至待机模式并停止定时器
+ */
+void thermostat_sleep_timer_tick(thermostat_dev_t *dev);
 
 #ifdef __cplusplus
 }

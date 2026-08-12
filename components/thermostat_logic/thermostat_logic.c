@@ -14,6 +14,15 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     dev->pending_led_effect = LED_EFFECT_NONE;
     dev->pairing_start_time_ms = 0;
 
+    // UI 页面管理初始化
+    dev->current_page = UI_PAGE_MAIN;
+    dev->last_input_time_ms = 0;
+
+    // Sleep Timer 初始化
+    dev->sleep_timer_setting = 0;
+    dev->sleep_timer_active = false;
+    dev->sleep_timer_start_ms = 0;
+
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << heater_gpio),
         .mode = GPIO_MODE_OUTPUT,
@@ -105,8 +114,32 @@ void thermostat_factory_reset(thermostat_dev_t *dev) {
     dev->mode = THERMOSTAT_MODE_STANDBY;
     dev->pairing_start_time_ms = 0;
 
+    // 清空 UI 页面状态
+    dev->current_page = UI_PAGE_MAIN;
+    dev->last_input_time_ms = 0;
+
+    // 清空 Sleep Timer 状态
+    dev->sleep_timer_setting = 0;
+    dev->sleep_timer_active = false;
+    dev->sleep_timer_start_ms = 0;
+
     // 请求播放恢复出厂灯效
     dev->pending_led_effect = LED_EFFECT_FACTORY_RESET;
 
     ESP_LOGI(TAG, "Factory reset complete. LED effect queued, reboot pending.");
+}
+
+void thermostat_sleep_timer_tick(thermostat_dev_t *dev) {
+    if (!dev || !dev->sleep_timer_active || dev->sleep_timer_start_ms == 0) return;
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    int64_t elapsed_ms = now_ms - dev->sleep_timer_start_ms;
+    int64_t target_ms  = (int64_t)dev->sleep_timer_setting * 60LL * 1000LL;
+
+    if (elapsed_ms >= target_ms) {
+        ESP_LOGI(TAG, "Sleep Timer expired (%d min) -> Entering STANDBY", dev->sleep_timer_setting);
+        dev->sleep_timer_active   = false;
+        dev->sleep_timer_start_ms = 0;
+        thermostat_set_mode(dev, THERMOSTAT_MODE_STANDBY);
+    }
 }

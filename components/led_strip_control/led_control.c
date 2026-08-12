@@ -290,6 +290,18 @@ bool led_control_effect_finished(const thermostat_dev_t *dev) {
             s_effect_state.phase == EFFECT_PHASE_IDLE);
 }
 
+// 根据当前 DHT11 实测温度，返回待机模式 LED_1 呼吸灯颜色
+// 映射：<=17 蓝, 18 青, 19 绿, 20 黄, 21 橙, 22 红, >=23 紫
+static rgb_color_t get_standby_color(float temp) {
+    if (temp <= 17.0f) return COLOR_BLUE;
+    if (temp <= 18.0f) return COLOR_CYAN;
+    if (temp <= 19.0f) return COLOR_GREEN;
+    if (temp <= 20.0f) return COLOR_YELLOW;
+    if (temp <= 21.0f) return COLOR_ORANGE;
+    if (temp <= 22.0f) return COLOR_RED;
+    return COLOR_PURPLE;
+}
+
 void led_control_update(const thermostat_dev_t *dev) {
     if (!s_led_strip || !dev) return;
 
@@ -306,30 +318,13 @@ void led_control_update(const thermostat_dev_t *dev) {
 
     // ---- 正常模式渲染 ----
     if (dev->mode == THERMOSTAT_MODE_PAIRING) {
-        // 配网模式：LED_1 显示黄色呼吸灯，呼吸周期 2 秒
+        // 配网进行中：LED_1 显示黄色呼吸灯，呼吸周期为 2 秒
         float factor = get_breathing_factor(2000);
         leds[0].r = (uint8_t)(COLOR_YELLOW.r * factor);
         leds[0].g = (uint8_t)(COLOR_YELLOW.g * factor);
         leds[0].b = (uint8_t)(COLOR_YELLOW.b * factor);
-    } 
-    else if (dev->mode == THERMOSTAT_MODE_STANDBY) {
-        // 待机模式：LED_2~6 熄灭，LED_1 根据实测温度以 2s 周期呼吸
-        float factor = get_breathing_factor(2000);
-        rgb_color_t base_color = COLOR_BLUE;
-        int t = (int)roundf(dev->current_temp);
-        if (t <= 17) base_color = COLOR_BLUE;
-        else if (t == 18) base_color = COLOR_CYAN;
-        else if (t == 19) base_color = COLOR_GREEN;
-        else if (t == 20) base_color = COLOR_YELLOW;
-        else if (t == 21) base_color = COLOR_ORANGE;
-        else if (t == 22) base_color = COLOR_RED;
-        else base_color = COLOR_PURPLE; // >= 23
-
-        leds[0].r = (uint8_t)(base_color.r * factor);
-        leds[0].g = (uint8_t)(base_color.g * factor);
-        leds[0].b = (uint8_t)(base_color.b * factor);
-    } 
-    else if (dev->mode == THERMOSTAT_MODE_ON) {
+        // LED_2 ~ LED_6 熄灭
+    } else if (dev->mode == THERMOSTAT_MODE_ON) {
         // 1. LED_1 加热/状态指示灯
         if (dev->is_heating) {
             // 循环 200ms 橙色 -> 200ms 红色 -> 200ms 紫色
@@ -345,22 +340,17 @@ void led_control_update(const thermostat_dev_t *dev) {
         // 2. LED_2 ~ LED_6 温度阶梯指示灯
         // 映射规则：LED_2(<=17C), LED_3(18C), LED_4(19C), LED_5(20C), LED_6(>=21C)
         float cur = dev->current_temp;
-        int target = dev->target_temp;
+        int target = (int)dev->target_temp;
 
         for (int i = 1; i <= 5; i++) {
-            // i=1 (LED_2, threshold 17), i=2 (LED_3, 18), i=3 (LED_4, 19), i=4 (LED_5, 20), i=5 (LED_6, 21)
             int led_temp = 16 + i;
-
             if (led_temp == target) {
-                // 设定温度对应的指示灯
-                if (cur < (float)target) {
-                    // 紫色呼吸灯 (周期 1s)
-                    float factor = get_breathing_factor(1000);
-                    leds[i].r = (uint8_t)(COLOR_PURPLE.r * factor);
-                    leds[i].g = (uint8_t)(COLOR_PURPLE.g * factor);
-                    leds[i].b = (uint8_t)(COLOR_PURPLE.b * factor);
+                // 设定温度对应的指示灯：显示紫色
+                // 若实测温度 < 设定温度：显示紫色
+                // 若实测温度 >= 设定温度：交替显示绿色和紫色，各切换保持 1 秒
+                if (cur < dev->target_temp) {
+                    leds[i] = COLOR_PURPLE;
                 } else {
-                    // 实测 >= 设定：交替显示绿色和紫色，各 1s
                     int64_t now_ms = esp_timer_get_time() / 1000;
                     if ((now_ms / 1000) % 2 == 0) {
                         leds[i] = COLOR_GREEN;
@@ -376,6 +366,21 @@ void led_control_update(const thermostat_dev_t *dev) {
                 leds[i] = COLOR_OFF;
             }
         }
+
+        // 开机模式所有 LED 亮度设定为 50%
+        for (int i = 0; i < LED_NUM_TOTAL; i++) {
+            leds[i].r = leds[i].r / 2;
+            leds[i].g = leds[i].g / 2;
+            leds[i].b = leds[i].b / 2;
+        }
+    } else if (dev->mode == THERMOSTAT_MODE_STANDBY) {
+        // 待机模式：LED_1 根据实测温度以 2 秒周期呼吸显示对应颜色
+        // LED_2 ~ LED_6 熄灭
+        rgb_color_t color = get_standby_color(dev->current_temp);
+        float factor = get_breathing_factor(2000);
+        leds[0].r = (uint8_t)(color.r * factor);
+        leds[0].g = (uint8_t)(color.g * factor);
+        leds[0].b = (uint8_t)(color.b * factor);
     }
 
     // 刷新 RGB 数组到硬件
