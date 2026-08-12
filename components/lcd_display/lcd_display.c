@@ -36,7 +36,8 @@ static lv_disp_t *s_disp = NULL;
 static thermostat_dev_t *s_dev = NULL;
 
 // ---- UI 控件句柄 ----
-static lv_obj_t *s_lbl_topbar;      // 顶部信息栏 (日期/时间/Wi-Fi)
+static lv_obj_t *s_lbl_time;        // 顶部信息栏 (日期/时间)
+static lv_obj_t *s_lbl_wifi;        // 顶部信息栏 (Wi-Fi 符号, 靠最右)
 static lv_obj_t *s_lbl_room_temp;   // 当前室温大字
 static lv_obj_t *s_lbl_room_label;  // "TEMP" 标签
 static lv_obj_t *s_lbl_set_temp;    // 设定温度
@@ -56,14 +57,21 @@ static thermostat_mode_t s_last_mode = THERMOSTAT_MODE_STANDBY;
 // 创建主页面控件
 static void ui_create_main_page(void) {
     // 顶部信息栏 (0-30px)
-    s_lbl_topbar = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_topbar, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_topbar, lv_color_white(), 0);
-    lv_obj_align(s_lbl_topbar, LV_ALIGN_TOP_LEFT, 8, 6);
+    // 左侧：日期/时间 (原 14 号字放大 1.5 倍 -> 20 号字)
+    s_lbl_time = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_font(s_lbl_time, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lbl_time, lv_color_white(), 0);
+    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_LEFT, 8, 6);
 
-    // 当前室温大字 (居中, 30-180px 区域)
+    // 右侧：Wi-Fi 符号 (靠最右边放置, 与时间同字号)
+    s_lbl_wifi = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_font(s_lbl_wifi, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lbl_wifi, lv_color_white(), 0);
+    lv_obj_align(s_lbl_wifi, LV_ALIGN_TOP_RIGHT, -8, 6);
+
+    // 当前室温大字 (居中, 30-180px 区域, 原 32 号字放大 2 倍 -> 48 号字)
     s_lbl_room_temp = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(s_lbl_room_temp, lv_color_white(), 0);
     lv_obj_align(s_lbl_room_temp, LV_ALIGN_CENTER, 0, -60);
 
@@ -73,21 +81,21 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_text_color(s_lbl_room_label, lv_color_hex(0xAAAAAA), 0);
     lv_obj_align(s_lbl_room_label, LV_ALIGN_CENTER, 0, -20);
 
-    // 设定温度 (180-250px 区域)
+    // 设定温度 (180-250px 区域, 原 20 号字放大 2 倍 -> 40 号字)
     s_lbl_set_temp = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_set_temp, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(s_lbl_set_temp, &lv_font_montserrat_40, 0);
     lv_obj_set_style_text_color(s_lbl_set_temp, lv_color_hex(0x00BFFF), 0);
     lv_obj_align(s_lbl_set_temp, LV_ALIGN_CENTER, 0, 40);
 
-    // 底部状态栏 (250-320px)
+    // 底部状态栏 (250-320px, 原 16 号字放大 1.5 倍 -> 24 号字)
     // 左侧：加热状态
     s_lbl_heat = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_heat, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_lbl_heat, &lv_font_montserrat_24, 0);
     lv_obj_align(s_lbl_heat, LV_ALIGN_BOTTOM_LEFT, 12, -12);
 
     // 右侧：定时状态
     s_lbl_timer = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_timer, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_lbl_timer, &lv_font_montserrat_24, 0);
     lv_obj_align(s_lbl_timer, LV_ALIGN_BOTTOM_RIGHT, -12, -12);
 
     // 待机页 STANDBY 文字 (默认隐藏)
@@ -102,12 +110,12 @@ static void ui_create_main_page(void) {
 static void ui_update_main_page(void) {
     char buf[64];
 
-    // 顶部信息栏：日期时间 + Wi-Fi 状态
+    // 顶部信息栏：左侧日期时间，右侧 Wi-Fi 符号 (靠最右)
     // 由于未接入 RTC/网络时间，此处显示固定占位时间，
     // Wi-Fi 状态使用 LVGL 内置符号 LV_SYMBOL_WIFI (U+F1EB)，
-    // 该符号已包含在 lv_font_montserrat_14 字库中，无需额外加载字体。
-    snprintf(buf, sizeof(buf), "2026-08-11 10:30   %s", LV_SYMBOL_WIFI);
-    lv_label_set_text(s_lbl_topbar, buf);
+    // 该符号已包含在 lv_font_montserrat_20 字库中，无需额外加载字体。
+    lv_label_set_text(s_lbl_time, "2026-08-11 10:30");
+    lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI);
 
     // 当前室温 (保留 1 位小数)
     snprintf(buf, sizeof(buf), "%.1f C", s_dev->current_temp);
@@ -143,8 +151,8 @@ static void ui_update_standby_page(void) {
     char buf[64];
 
     // 顶部信息栏 (Wi-Fi 状态使用 LVGL 内置符号 LV_SYMBOL_WIFI)
-    snprintf(buf, sizeof(buf), "2026-08-11 10:30   %s", LV_SYMBOL_WIFI);
-    lv_label_set_text(s_lbl_topbar, buf);
+    lv_label_set_text(s_lbl_time, "2026-08-11 10:30");
+    lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI);
 
     // 当前室温 (中号字)
     snprintf(buf, sizeof(buf), "%.1f C", s_dev->current_temp);
@@ -175,7 +183,7 @@ static void ui_render(void) {
     lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
     ui_update_main_page();
 }
 

@@ -1,7 +1,7 @@
 # 项目状态文档 (Project Status)
 
 > 本文档用于记录当前会话的工作进展、已完成/未完成事项，以及新会话接手时需要了解的关键上下文。
-> 最后更新：2026-08-11
+> 最后更新：2026-08-12
 
 ---
 
@@ -96,6 +96,15 @@
 - **白底黑字**：`esp_lcd_panel_invert_color(panel, true)` 导致颜色反转。**修复**：改为 `false`，实现黑底白字。
 - **TEXT → TEMP**：`s_lbl_room_label` 创建后未设置文本。**修复**：在 `ui_update_main_page()` 中新增 `lv_label_set_text(s_lbl_room_label, "TEMP")`。
 - **验证**：重新编译通过（`matter-thermostat.bin` 生成成功）。
+
+### 3.9 主页面字号放大与 Wi-Fi 图标右对齐（已完成）
+根据需求调整主页面各行的字符尺寸，并让 Wi-Fi 图标靠最右放置：
+
+1. **`components/lcd_display/lcd_display.c`**：
+   - 顶部信息栏拆分为两个标签：左侧 `s_lbl_time`（日期/时间）、右侧 `s_lbl_wifi`（Wi-Fi 符号，`LV_ALIGN_TOP_RIGHT` 靠最右）。
+   - 字号调整：顶部信息栏 14 → 20（1.5 倍）；当前室温 32 → 48（2 倍）；设定温度 20 → 40（2 倍）；底部状态栏（HEAT/TIMER）16 → 24（1.5 倍）。
+2. **`sdkconfig.defaults` / `sdkconfig`**：新增启用 LVGL 字体 `CONFIG_LV_FONT_MONTSERRAT_24/40/48`。
+3. **构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 26%）。
 
 ---
 
