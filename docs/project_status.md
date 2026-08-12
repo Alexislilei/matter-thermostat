@@ -106,6 +106,18 @@
 2. **`sdkconfig.defaults` / `sdkconfig`**：新增启用 LVGL 字体 `CONFIG_LV_FONT_MONTSERRAT_24/40/48`。
 3. **构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 26%）。
 
+### 3.10 实现 Sleep Timer 设置页 UI（已完成）
+在 `components/lcd_display/lcd_display.c` 中实现了 Sleep Timer 设置页的完整 UI 渲染：
+
+1. **新增控件句柄**：`s_lbl_sleep_title`（页面标题）与 `s_lbl_sleep_options[4]`（4 个选项标签）。
+2. **新增 `ui_create_sleep_timer_page()`**：创建页面标题 `SLEEP TIMER SETTING`（顶部居中，20 号字）及 4 个纵向排列的选项标签（`OFF` / `10 MIN` / `30 MIN` / `60 MIN`，24 号字），默认隐藏。
+3. **新增 `ui_update_sleep_timer_page()`**：根据 `sleep_timer_setting` 高亮当前选中项（白色），其余选项置灰（`0x555555`）。
+4. **修改 `ui_render()`**：新增 `UI_PAGE_SLEEP_TIMER` 分支——隐藏主页面/待机页元素，显示 Sleep Timer 设置页控件；主页面与待机页分支同时隐藏 Sleep Timer 控件，避免页面残留。
+5. **修改 `lcd_display_init()`**：在创建主页面控件后调用 `ui_create_sleep_timer_page()`。
+6. **构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 26%）。
+
+> 说明：页面切换、编码器循环选择（OFF -> 10 -> 30 -> 60 MIN）、60s 超时返回主页面等逻辑已在 `components/button_handler/button_handler.c` 中实现，本次仅补齐了对应的 UI 渲染层。
+
 ---
 
 ## 4. 未完成 / 待处理事项
@@ -115,8 +127,8 @@
 
 ### 4.2 待验证事项
 - ~~烧录后验证屏幕实际显示温控器页面~~（**已完成**：屏幕显示正常，黑底白字、方向正确、TEMP 标签正确，见 3.8 节）。
+- ~~Sleep Timer 设置页的 UI 尚未在 `lcd_display.c` 中实现~~（**已完成**：见 3.10 节，已实现标题 + 4 选项高亮渲染，编译通过）。
 - 触摸屏（XPT2046）驱动尚未实现（当前仅实现显示，未实现触控输入）。
-- Sleep Timer 设置页的 UI 尚未在 `lcd_display.c` 中实现（当前仅实现主页面与待机页渲染，页面切换逻辑在 `button_handler` 中）。
 
 ---
 
@@ -142,7 +154,6 @@
 1. **LCD 驱动编译问题已解决**（采用方案 A 变体：`espressif/esp_lcd_ili9341` 组件，见 3.6 节），项目已编译通过。
 2. **屏幕显示验证已通过**（见 3.8 节）：黑底白字、方向正确、TEMP 标签正确，烧录后显示正常。
 3. 后续可继续实现：
-   - **Sleep Timer 设置页 UI**（当前 `lcd_display.c` 仅实现主页面与待机页渲染）。
    - **触摸屏（XPT2046）驱动**（当前仅实现显示，未实现触控输入）。
 4. 构建命令：
    ```bash

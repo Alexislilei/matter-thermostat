@@ -4,6 +4,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
@@ -45,6 +46,10 @@ static lv_obj_t *s_lbl_heat;        // 加热状态
 static lv_obj_t *s_lbl_timer;       // 定时状态
 static lv_obj_t *s_lbl_standby;     // 待机页 STANDBY 文字
 
+// ---- Sleep Timer 设置页控件 ----
+static lv_obj_t *s_lbl_sleep_title;      // 页面标题 "SLEEP TIMER SETTING"
+static lv_obj_t *s_lbl_sleep_options[4]; // 4 个选项标签 (OFF / 10 MIN / 30 MIN / 60 MIN)
+
 // 记录上次渲染状态，避免无变化时重复刷新
 static float s_last_room_temp = -999.0f;
 static float s_last_set_temp = -999.0f;
@@ -53,6 +58,11 @@ static int   s_last_timer_setting = -1;
 static bool  s_last_timer_active = false;
 static ui_page_t s_last_page = UI_PAGE_MAIN;
 static thermostat_mode_t s_last_mode = THERMOSTAT_MODE_STANDBY;
+
+// ---- 倒计时显示与最后10秒闪烁状态 ----
+static int     s_last_timer_remaining_sec = -1; // 上次显示的倒计时剩余秒数 (-1=未倒计时)
+static bool    s_blink_visible = true;          // 最后10秒闪烁的可见状态 (true=亮, false=灭)
+static int64_t s_last_blink_toggle_ms = 0;      // 上次闪烁切换时间戳 (ms)
 
 // 创建主页面控件
 static void ui_create_main_page(void) {
@@ -93,9 +103,10 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_text_font(s_lbl_heat, &lv_font_montserrat_24, 0);
     lv_obj_align(s_lbl_heat, LV_ALIGN_BOTTOM_LEFT, 12, -12);
 
-    // 右侧：定时状态
+    // 右侧：定时状态 (字母与数字颜色均设为白色)
     s_lbl_timer = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_font(s_lbl_timer, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_lbl_timer, lv_color_white(), 0);
     lv_obj_align(s_lbl_timer, LV_ALIGN_BOTTOM_RIGHT, -12, -12);
 
     // 待机页 STANDBY 文字 (默认隐藏)
@@ -104,6 +115,63 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_text_color(s_lbl_standby, lv_color_white(), 0);
     lv_obj_align(s_lbl_standby, LV_ALIGN_CENTER, 0, 40);
     lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
+}
+
+// 创建 Sleep Timer 设置页控件
+// 布局：顶部标题 + 4 个纵向排列的选项 (OFF / 10 MIN / 30 MIN / 60 MIN)
+static void ui_create_sleep_timer_page(void) {
+    static const char *option_texts[4] = {"OFF", "10 MIN", "30 MIN", "60 MIN"};
+
+    // 页面标题 (顶部居中)
+    // 注意：主页面顶部信息栏 (时间/Wi-Fi) 位于 0-30px 区域，
+    // 标题需放在时间那一行的下方 (y=40)，避免与时间显示重叠。
+    s_lbl_sleep_title = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_font(s_lbl_sleep_title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lbl_sleep_title, lv_color_white(), 0);
+    lv_label_set_text(s_lbl_sleep_title, "SLEEP TIMER SETTING");
+    lv_obj_align(s_lbl_sleep_title, LV_ALIGN_TOP_MID, 0, 40);
+
+    // 4 个选项标签 (纵向排列，居中)
+    for (int i = 0; i < 4; i++) {
+        s_lbl_sleep_options[i] = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(s_lbl_sleep_options[i], &lv_font_montserrat_24, 0);
+        lv_label_set_text(s_lbl_sleep_options[i], option_texts[i]);
+        // 纵向排列：从屏幕中部开始，每个选项间隔 40px
+        lv_obj_align(s_lbl_sleep_options[i], LV_ALIGN_CENTER, 0, -60 + i * 40);
+        // 默认隐藏，进入该页面时才显示
+        lv_obj_add_flag(s_lbl_sleep_options[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// 更新 Sleep Timer 设置页显示内容
+// 根据当前 sleep_timer_setting 高亮对应的选项 (白色加粗/高亮)，其余选项置灰
+static void ui_update_sleep_timer_page(void) {
+    // 选项值与 sleep_timer_setting 的映射: {0, 10, 30, 60}
+    static const int option_values[4] = {0, 10, 30, 60};
+
+    for (int i = 0; i < 4; i++) {
+        if (s_dev->sleep_timer_setting == option_values[i]) {
+            // 当前选中项：高亮 (白色)
+            lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_white(), 0);
+        } else {
+            // 未选中项：置灰
+            lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_hex(0x555555), 0);
+        }
+    }
+}
+
+// 计算 Sleep Timer 剩余秒数
+// 倒计时进行中返回剩余秒数 (>0)，未倒计时返回 -1
+static int timer_remaining_seconds(const thermostat_dev_t *dev) {
+    if (!dev->sleep_timer_active || dev->sleep_timer_start_ms == 0) {
+        return -1;
+    }
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    int64_t elapsed_ms = now_ms - dev->sleep_timer_start_ms;
+    int64_t target_ms = (int64_t)dev->sleep_timer_setting * 60LL * 1000LL;
+    int64_t remaining_ms = target_ms - elapsed_ms;
+    if (remaining_ms <= 0) return 0;
+    return (int)((remaining_ms + 999) / 1000); // 向上取整到秒
 }
 
 // 更新主页面显示内容
@@ -124,9 +192,20 @@ static void ui_update_main_page(void) {
     // 室温下方的 "TEMP" 标签
     lv_label_set_text(s_lbl_room_label, "TEMP");
 
-    // 设定温度
-    snprintf(buf, sizeof(buf), "SET: %.0f C", s_dev->target_temp);
+    // 设定温度 (保留 1 位小数)
+    snprintf(buf, sizeof(buf), "SET: %.1f C", s_dev->target_temp);
     lv_label_set_text(s_lbl_set_temp, buf);
+
+    // 最后10秒：设定温度行闪烁 (亮0.5s / 灭0.5s)
+    if (s_last_timer_remaining_sec > 0 && s_last_timer_remaining_sec <= 10) {
+        if (s_blink_visible) {
+            lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // 加热状态
     if (s_dev->is_heating) {
@@ -137,9 +216,16 @@ static void ui_update_main_page(void) {
         lv_obj_set_style_text_color(s_lbl_heat, lv_color_hex(0x888888), 0);
     }
 
-    // 定时状态
+    // 定时状态：倒计时中显示 mm:ss (仅数字)，未开启显示 TIMER: OFF
     if (s_dev->sleep_timer_active && s_dev->sleep_timer_setting > 0) {
-        snprintf(buf, sizeof(buf), "TIMER: %dM", s_dev->sleep_timer_setting);
+        int remaining = timer_remaining_seconds(s_dev);
+        if (remaining > 0) {
+            int mm = remaining / 60;
+            int ss = remaining % 60;
+            snprintf(buf, sizeof(buf), "%02d:%02d", mm, ss);
+        } else {
+            snprintf(buf, sizeof(buf), "00:00");
+        }
     } else {
         snprintf(buf, sizeof(buf), "TIMER: OFF");
     }
@@ -172,17 +258,47 @@ static void ui_render(void) {
         lv_obj_add_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
-        // 待机页室温用中号字
-        lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_20, 0);
+        // 隐藏 Sleep Timer 设置页控件
+        lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 4; i++) {
+            lv_obj_add_flag(s_lbl_sleep_options[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        // 待机页室温与主页面一致，用超大号字 (48 号字)
+        lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
         ui_update_standby_page();
         return;
     }
 
-    // 开机模式：显示主页面
+    // 开机模式 + Sleep Timer 设置页：显示 Sleep Timer 设置页
+    if (s_dev->current_page == UI_PAGE_SLEEP_TIMER) {
+        // 隐藏主页面/待机页元素
+        lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_room_temp, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_room_label, LV_OBJ_FLAG_HIDDEN);
+        // 显示 Sleep Timer 设置页控件
+        lv_obj_clear_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 4; i++) {
+            lv_obj_clear_flag(s_lbl_sleep_options[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        ui_update_sleep_timer_page();
+        return;
+    }
+
+    // 开机模式 + 主页面：显示主页面
     lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_room_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_room_label, LV_OBJ_FLAG_HIDDEN);
+    // 隐藏 Sleep Timer 设置页控件
+    lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < 4; i++) {
+        lv_obj_add_flag(s_lbl_sleep_options[i], LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
     ui_update_main_page();
 }
@@ -269,6 +385,7 @@ esp_err_t lcd_display_init(thermostat_dev_t *dev) {
     lvgl_port_lock(0);
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);
     ui_create_main_page();
+    ui_create_sleep_timer_page();
     lvgl_port_unlock();
 
     ESP_LOGI(TAG, "LCD display initialized: %dx%d", LCD_H_RES, LCD_V_RES);
@@ -279,6 +396,9 @@ void lcd_display_update(thermostat_dev_t *dev) {
     if (!dev || !s_disp) return;
     s_dev = dev;
 
+    // 计算当前倒计时剩余秒数 (未倒计时为 -1)
+    int remaining_sec = timer_remaining_seconds(dev);
+
     // 检测状态变化，仅在变化时刷新 UI
     bool changed = false;
     if (dev->current_temp != s_last_room_temp ||
@@ -287,8 +407,26 @@ void lcd_display_update(thermostat_dev_t *dev) {
         dev->sleep_timer_setting != s_last_timer_setting ||
         dev->sleep_timer_active != s_last_timer_active ||
         dev->current_page != s_last_page ||
-        dev->mode != s_last_mode) {
+        dev->mode != s_last_mode ||
+        remaining_sec != s_last_timer_remaining_sec) {
         changed = true;
+    }
+
+    // 最后10秒闪烁逻辑：亮0.5s / 灭0.5s
+    if (remaining_sec > 0 && remaining_sec <= 10) {
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (s_last_blink_toggle_ms == 0) {
+            s_last_blink_toggle_ms = now_ms;
+            s_blink_visible = true;
+        } else if (now_ms - s_last_blink_toggle_ms >= 500) {
+            s_last_blink_toggle_ms = now_ms;
+            s_blink_visible = !s_blink_visible;
+            changed = true; // 闪烁状态变化，触发重绘
+        }
+    } else {
+        // 非最后10秒：复位闪烁状态
+        s_last_blink_toggle_ms = 0;
+        s_blink_visible = true;
     }
 
     if (changed) {
@@ -299,6 +437,7 @@ void lcd_display_update(thermostat_dev_t *dev) {
         s_last_timer_active = dev->sleep_timer_active;
         s_last_page = dev->current_page;
         s_last_mode = dev->mode;
+        s_last_timer_remaining_sec = remaining_sec;
 
         lvgl_port_lock(0);
         ui_render();
