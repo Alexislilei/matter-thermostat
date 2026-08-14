@@ -12,6 +12,7 @@
 #include "button_handler.h"
 #include "app_matter.h"
 #include "lcd_display.h"
+#include "crash_monitor.h"
 
 static const char *TAG = "MAIN";
 
@@ -44,6 +45,9 @@ static void temp_control_task(void *pvParameters) {
     float temp_val = 0.0f;
 
     while (1) {
+        // ---- 崩溃监控心跳：周期性记录运行时长快照，便于崩溃后定位时间点 ----
+        crash_monitor_heartbeat(60000);   // 每 60 秒打印一次心跳日志
+
         // ---- 温度采集与温控 ----
         esp_err_t err = dht11_read_filtered(&s_dht11, &temp_val);
         if (err == ESP_OK) {
@@ -141,6 +145,9 @@ static void button_poll_task(void *pvParameters) {
 void app_main(void) {
     ESP_LOGI(TAG, "=== Starting ESP32-C6 Matter Thermostat ===");
 
+    // 0. 崩溃监控初始化：打印上次复位原因/崩溃时间点（需在最早阶段调用）
+    ESP_ERROR_CHECK(crash_monitor_init());
+
     // 1. NVS 初始化
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -148,6 +155,9 @@ void app_main(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // 1.1 打印 NVS 中保存的历史复位记录（跨拔插 USB 保留，用于追溯真实崩溃原因）
+    crash_monitor_print_history();
 
     // 2. 初始化 LCD / 触摸屏 GPIO
     //    硬件上所有 TFT-LCD 与触摸屏引脚均未连接外部上拉电阻，
@@ -219,9 +229,12 @@ void app_main(void) {
     thermostat_set_mode(&s_thermostat, THERMOSTAT_MODE_ON);
 
     // 9. 创建后台并发 Task
+    //    注意：lcd_ui_task 会执行 LVGL 控件操作 (lv_label_set_text / lv_obj_set_style_* 等)，
+    //    这些操作需要较大的栈空间。若栈过小，长时间运行后可能触发栈溢出，
+    //    导致内存损坏与系统重启。故将 lcd_ui_task 栈提升至 8192。
     xTaskCreate(temp_control_task, "temp_control_task", 4096, NULL, 5, NULL);
     xTaskCreate(led_ui_task,       "led_ui_task",       3072, NULL, 4, NULL);
-    xTaskCreate(lcd_ui_task,       "lcd_ui_task",       4096, NULL, 4, NULL);
+    xTaskCreate(lcd_ui_task,       "lcd_ui_task",       8192, NULL, 4, NULL);
     xTaskCreate(button_poll_task,  "button_poll_task",  3072, NULL, 6, NULL);
 
     ESP_LOGI(TAG, "Initialization complete. Thermostat tasks running.");

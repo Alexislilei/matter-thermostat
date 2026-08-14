@@ -192,6 +192,15 @@ extern "C" esp_err_t app_matter_init(thermostat_dev_t *dev) {
     return ESP_OK;
 }
 
+// 记录上次已上报的 Matter 属性值，用于"仅在变化时上报"。
+// 避免在未配网/无控制器订阅时，每 2 秒无条件调用 attribute::update()，
+// 导致 Matter 上报队列持续累积、内存缓慢泄漏，最终在长时间运行后
+// 因堆内存耗尽而触发系统重启（表现为约 15 分钟后无日志直接复位）。
+static int16_t s_last_local_temp_hundredths = INT16_MIN;
+static uint8_t s_last_running_mode = 0xFF;
+static uint8_t s_last_pi_demand = 0xFF;
+static uint16_t s_last_running_state = 0xFFFF;
+
 extern "C" void app_matter_update(const thermostat_dev_t *dev) {
     if (!dev || s_thermostat_endpoint_id == 0) return;
 
@@ -199,9 +208,13 @@ extern "C" void app_matter_update(const thermostat_dev_t *dev) {
     int16_t local_temp_hundredths  = (int16_t)(dev->current_temp * 100.0f);
 
     // 同步当前实测温度 (LocalTemperature 为设备上报属性，attribute::update 合法)
-    esp_matter_attr_val_t val_local = esp_matter_nullable_int16(local_temp_hundredths);
-    attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
-                      Thermostat::Attributes::LocalTemperature::Id, &val_local);
+    // 仅在数值变化时上报，减少 Matter 上报队列压力
+    if (local_temp_hundredths != s_last_local_temp_hundredths) {
+        s_last_local_temp_hundredths = local_temp_hundredths;
+        esp_matter_attr_val_t val_local = esp_matter_nullable_int16(local_temp_hundredths);
+        attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
+                          Thermostat::Attributes::LocalTemperature::Id, &val_local);
+    }
 
     // 注意: OccupiedHeatingSetpoint 不由设备周期性推送。
     // 该属性应由控制器 (HomeKit) 写入，设备仅当用户本地按键改变目标温度时，
@@ -212,9 +225,12 @@ extern "C" void app_matter_update(const thermostat_dev_t *dev) {
     // 同步 ThermostatRunningMode: 根据当前模式设置
     // 0x00 = Off, 0x01 = Cool, 0x02 = Cool (不再使用), 0x03 = Heat
     uint8_t running_mode = (dev->mode == THERMOSTAT_MODE_ON) ? 0x03 : 0x00; // Heat or Off
-    esp_matter_attr_val_t val_running_mode = esp_matter_enum8(running_mode);
-    attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
-                      Thermostat::Attributes::ThermostatRunningMode::Id, &val_running_mode);
+    if (running_mode != s_last_running_mode) {
+        s_last_running_mode = running_mode;
+        esp_matter_attr_val_t val_running_mode = esp_matter_enum8(running_mode);
+        attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
+                          Thermostat::Attributes::ThermostatRunningMode::Id, &val_running_mode);
+    }
 
     // 同步 PIHeatingDemand: 根据加热状态计算百分比
     // 如果加热开启且温度低于目标，按温差比例计算需求
@@ -229,9 +245,12 @@ extern "C" void app_matter_update(const thermostat_dev_t *dev) {
         // 即使温差很小，只要加热器在工作，至少给 10%
         if (pi_demand < 10) pi_demand = 10;
     }
-    esp_matter_attr_val_t val_pi_demand = esp_matter_uint8(pi_demand);
-    attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
-                      Thermostat::Attributes::PIHeatingDemand::Id, &val_pi_demand);
+    if (pi_demand != s_last_pi_demand) {
+        s_last_pi_demand = pi_demand;
+        esp_matter_attr_val_t val_pi_demand = esp_matter_uint8(pi_demand);
+        attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
+                          Thermostat::Attributes::PIHeatingDemand::Id, &val_pi_demand);
+    }
 
     // 同步 ThermostatRunningState: bitmap16
     // bit0=Heat, bit1=Cool, bit2= Fan, bit3=Heat Stage 2, ...
@@ -239,9 +258,12 @@ extern "C" void app_matter_update(const thermostat_dev_t *dev) {
     if (dev->mode == THERMOSTAT_MODE_ON && dev->is_heating) {
         running_state |= 0x0001; // Heat ON
     }
-    esp_matter_attr_val_t val_running_state = esp_matter_bitmap16(running_state);
-    attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
-                      Thermostat::Attributes::ThermostatRunningState::Id, &val_running_state);
+    if (running_state != s_last_running_state) {
+        s_last_running_state = running_state;
+        esp_matter_attr_val_t val_running_state = esp_matter_bitmap16(running_state);
+        attribute::update(s_thermostat_endpoint_id, Thermostat::Id,
+                          Thermostat::Attributes::ThermostatRunningState::Id, &val_running_state);
+    }
 
     // 注意: SystemMode 是由控制器 (HomeKit) 写入的属性，不在此处周期性推送。
     // 模式切换时通过 app_matter_set_mode() 单次同步。

@@ -19,6 +19,15 @@ CONFIG_ESP_WIFI_IRAM_OPT=n
 CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 CONFIG_BT_NIMBLE_HOST_IRAM_OPT=n
 
+# 崩溃诊断配置
+# 1) 启用 Core Dump 到 Flash：崩溃时保存精确调用栈，重启后用
+#    `idf.py coredump-info` 解码定位崩溃位置（需在 partitions.csv 中
+#    添加 coredump 分区）。
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+# 2) 崩溃后延迟 5 秒再重启，确保串口日志完整输出，避免错过崩溃瞬间信息
+CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=5
+
 # LVGL 字体配置 (LCD UI 使用)
 # 顶部信息栏用 20 (原14的1.5倍)；TEMP 标签用 16；HEAT/TIMER 底部状态栏用 24 (原16的1.5倍)；
 # 设定温度用 40 (原20的2倍)；主页面大字/STANDBY 用 48 (原32的2倍)

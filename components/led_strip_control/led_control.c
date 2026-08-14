@@ -286,8 +286,16 @@ static void check_pending_effect(const thermostat_dev_t *dev) {
 
 bool led_control_effect_finished(const thermostat_dev_t *dev) {
     (void)dev; // dev 参数保留用于未来扩展
+
+    // 仅当瞬态灯效已启动并播放完毕 (phase == EFFECT_PHASE_DONE) 时才返回 true。
+    //
+    // 注意：不能使用 EFFECT_PHASE_IDLE 作为"已结束"的判断条件。
+    // 因为在 main.c 的 temp_control_task 中，设置 pending_led_effect 的同一轮
+    // 循环里就会调用本函数；此时 led_ui_task 尚未把灯效取走 (active_effect 仍为
+    // NONE、phase 仍为 IDLE)，若按 IDLE 判断会误判为"已结束"，导致 pending_led_effect
+    // 被立即清零、灯效永远无法播放。改用 DONE 后，只有真正播放完毕才会返回 true。
     return (s_effect_state.active_effect == LED_EFFECT_NONE &&
-            s_effect_state.phase == EFFECT_PHASE_IDLE);
+            s_effect_state.phase == EFFECT_PHASE_DONE);
 }
 
 // 根据当前 DHT11 实测温度，返回待机模式 LED_1 呼吸灯颜色

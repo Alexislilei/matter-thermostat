@@ -444,6 +444,10 @@ void lcd_display_update(thermostat_dev_t *dev) {
         lvgl_port_unlock();
     }
 
-    // 处理 LVGL 定时器任务 (tick 由 esp_lvgl_port 内部处理)
-    lv_timer_handler();
+    // 注意：不要在此处调用 lv_timer_handler()！
+    // lvgl_port_init() 已创建内部 "LVGL task"，该任务会持续调用 lv_timer_handler()
+    // 进行渲染刷新。若此处再调用一次，会导致两个任务并发执行 lv_timer_handler()，
+    // 破坏 LVGL 内部状态（显示缓冲/刷新状态机），长期运行后可能引发内存损坏与系统崩溃。
+    // 本函数仅负责在 lvgl_port_lock() 保护下更新 UI 控件状态，
+    // 实际的渲染刷新由 esp_lvgl_port 的内部任务完成。
 }

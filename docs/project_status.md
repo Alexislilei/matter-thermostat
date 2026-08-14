@@ -118,6 +118,53 @@
 
 > 说明：页面切换、编码器循环选择（OFF -> 10 -> 30 -> 60 MIN）、60s 超时返回主页面等逻辑已在 `components/button_handler/button_handler.c` 中实现，本次仅补齐了对应的 UI 渲染层。
 
+### 3.11 修复长时间运行后约 15 分钟自动重启问题（已完成）
+**现象**：设备长时间开机后（约 15 分钟，时间不精确）必定自动重启；重启瞬间串口打印中断、无特殊报错 log，Ubuntu 侧串口需重新设置。
+
+**根因分析**（多因素叠加，均可能导致堆内存耗尽 / 内存损坏后无日志复位）：
+1. **LVGL `lv_timer_handler()` 被两个任务并发调用**：
+   - `lvgl_port_init()`（`esp_lvgl_port` v1.4.0）内部已创建 "LVGL task"，该任务持续调用 `lv_timer_handler()` 进行渲染。
+   - 原 `lcd_display_update()` 末尾又手动调用了一次 `lv_timer_handler()`，且**未加 `lvgl_port_lock()` 互斥保护**，导致两个任务并发执行 LVGL 定时器/刷新逻辑，破坏 LVGL 内部状态（显示缓冲、刷新状态机），长期运行后引发内存损坏与崩溃。
+   - **修复**：删除 [`lcd_display.c`](components/lcd_display/lcd_display.c:446) 中手动调用 `lv_timer_handler()` 的代码，渲染统一交由 `esp_lvgl_port` 内部任务完成。
+2. **Matter 属性无条件周期性上报导致上报队列累积/内存泄漏**：
+   - 原 `app_matter_update()` 每 2 秒无条件调用 4 次 `attribute::update()`（LocalTemperature / ThermostatRunningMode / PIHeatingDemand / ThermostatRunningState）。
+   - 在未配网 / 无控制器订阅时，这些上报会在 Matter 上报队列中持续累积，缓慢泄漏内存，最终堆耗尽触发复位。
+   - **修复**：在 [`app_matter.cpp`](main/app_matter.cpp:195) 中为各属性增加"仅在数值变化时上报"的缓存判断，大幅减少上报调用次数。
+3. **`lcd_ui_task` 栈空间偏小**：LVGL 控件操作（`lv_label_set_text` / `lv_obj_set_style_*` 等）栈开销较大，4096 字节偏紧，长时间运行可能栈溢出。
+   - **修复**：将 [`main.c`](main/main.c:222) 中 `lcd_ui_task` 栈提升至 8192。
+
+**附带修复（LED 灯效状态机逻辑错误）**：
+- 原 `led_control_effect_finished()` 以 `phase == EFFECT_PHASE_IDLE` 作为"已结束"判断，存在两个 bug：
+  1. 在 `main.c` 设置 `pending_led_effect` 的同一轮循环中，`led_ui_task` 尚未取走灯效（`active_effect` 仍为 NONE、`phase` 仍为 IDLE），会被误判为"已结束"，导致 `pending_led_effect` 被立即清零、灯效永远无法播放。
+  2. 灯效真正播放完毕后 `phase` 变为 `EFFECT_PHASE_DONE`，反而永远返回 false，`pending_led_effect` 无法被清理。
+- **修复**：将 [`led_control.c`](components/led_strip_control/led_control.c:287) 的判断条件改为 `phase == EFFECT_PHASE_DONE`，使"仅当灯效真正播放完毕"才返回 true。
+
+**验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 26%）。
+
+### 3.12 新增崩溃监控组件（已完成）
+为解决"系统崩溃重启但难以抓到崩溃时间点与原因"的问题，新增 `components/crash_monitor/` 组件，并启用 Core Dump 到 Flash：
+
+1. **新增 `components/crash_monitor/` 组件**（`crash_monitor.c` / `crash_monitor.h` / `CMakeLists.txt`）：
+   - **复位原因捕获**：启动时读取 `esp_reset_reason()`，判断本次复位是否由异常/崩溃引起（PANIC / INT_WDT / TASK_WDT / WDT / BROWNOUT）。
+   - **崩溃时间点捕获**：使用 **RTC_NOINIT 内存**周期性保存"最近一次运行时长快照"。崩溃发生时，最后一次快照即为崩溃发生的大致时间点（误差 <= 心跳间隔）。
+   - **醒目启动横幅**：若检测到异常复位，启动时打印醒目的 `*** 检测到系统异常复位/崩溃 ***` 横幅，包含复位原因与崩溃时运行时长，无需紧盯串口即可得知。
+   - **心跳日志**：`crash_monitor_heartbeat()` 周期性打印运行时长，便于在串口日志中定位崩溃前设备运行了多久。
+   - **NVS 历史记录（新增）**：将每次启动的复位原因持久化到 NVS（Flash），保留最近 8 次记录。即使开发者在崩溃后拔插 USB 重新连接串口（导致本次上电复位原因被覆盖为 POWERON），也能从 NVS 历史中追溯真实的崩溃原因。`crash_monitor_print_history()` 打印历史记录。
+2. **启用 Core Dump 到 Flash**（`sdkconfig.defaults` / `sdkconfig`）：
+   - `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`：崩溃时保存精确调用栈到 Flash，重启后用 `idf.py coredump-info` 解码定位崩溃位置。
+   - `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y`：ELF 格式（含符号信息，便于解码）。
+   - 在 `partitions.csv` 中新增 `coredump` 分区（`data/coredump`，0x313000，0x10000）。
+3. **崩溃后延迟重启**：`CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=5`，崩溃后延迟 5 秒再重启，确保串口日志完整输出，避免错过崩溃瞬间信息。
+4. **集成到 `main/main.c`**：
+   - `app_main()` 最早期调用 `crash_monitor_init()`（内部自行初始化 NVS 并写入本次复位记录）。
+   - NVS 初始化后调用 `crash_monitor_print_history()` 打印历史复位记录。
+   - `temp_control_task` 循环中调用 `crash_monitor_heartbeat(60000)`（每 60 秒打印一次心跳）。
+   - `main/CMakeLists.txt` 的 REQUIRES 中新增 `crash_monitor`。
+
+**验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 25%），`espcoredump` 组件正常编译链接。
+
+> **诊断结论（重要）**：根据用户提供的实际崩溃日志，崩溃监控显示复位原因为 **POWERON（上电）**，而非 PANIC/WDT。但该复位原因可能因开发者在崩溃后拔插 USB 重连串口而被覆盖。为规避此问题，已新增 **NVS 历史记录**（见上文），即使拔插 USB 也能追溯真实崩溃原因。初步判断倾向硬件供电问题（进入配网模式时 Wi-Fi + BLE + Matter 同时工作产生峰值电流），但需结合 NVS 历史与 Core Dump 进一步确认。
+
 ---
 
 ## 4. 未完成 / 待处理事项
@@ -144,6 +191,7 @@
 | `components/button_handler/button_handler.c` | 按键/编码器处理（已补齐功能） |
 | `components/thermostat_logic/thermostat_logic.c` | 温控逻辑（迟滞控制、睡眠定时） |
 | `components/dht11/dht11.c` | DHT11 温度采集 |
+| `components/crash_monitor/crash_monitor.c` | 崩溃监控（复位原因 + 崩溃时间点捕获，见 3.12 节） |
 | `docs/01_requirements.md` | 需求规格说明书 |
 | `docs/02_sdkconfig_note.md` | sdkconfig 配置说明 |
 
@@ -153,9 +201,22 @@
 
 1. **LCD 驱动编译问题已解决**（采用方案 A 变体：`espressif/esp_lcd_ili9341` 组件，见 3.6 节），项目已编译通过。
 2. **屏幕显示验证已通过**（见 3.8 节）：黑底白字、方向正确、TEMP 标签正确，烧录后显示正常。
-3. 后续可继续实现：
+3. **崩溃诊断已启用**（见 3.12 节）：设备崩溃重启后，串口启动日志会打印醒目的崩溃横幅（复位原因 + 崩溃时运行时长），并已启用 Core Dump 到 Flash。
+4. **NVS 历史记录**：每次启动的复位原因会持久化到 NVS（保留最近 8 次），即使拔插 USB 重连串口也能追溯真实崩溃原因。启动日志会打印 `Boot History`。
+5. **崩溃后解码 Core Dump**（定位崩溃精确位置）：
+   ```bash
+   bash -c 'source /home/alex/esp/esp-idf/export.sh >/dev/null 2>&1 && idf.py coredump-info'
+   ```
+   > 需在崩溃发生后、且串口连接设备时执行；会读取 Flash 中的 core dump 并解码出崩溃调用栈。
+6. 后续可继续实现：
    - **触摸屏（XPT2046）驱动**（当前仅实现显示，未实现触控输入）。
-4. 构建命令：
+7. 构建命令：
+   ```bash
+   bash -c 'source /home/alex/esp/esp-idf/export.sh >/dev/null 2>&1 && idf.py build'
+   ```
+5. 后续可继续实现：
+   - **触摸屏（XPT2046）驱动**（当前仅实现显示，未实现触控输入）。
+6. 构建命令：
    ```bash
    bash -c 'source /home/alex/esp/esp-idf/export.sh >/dev/null 2>&1 && idf.py build'
    ```
