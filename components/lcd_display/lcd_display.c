@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -63,6 +64,10 @@ static thermostat_mode_t s_last_mode = THERMOSTAT_MODE_STANDBY;
 static int     s_last_timer_remaining_sec = -1; // 上次显示的倒计时剩余秒数 (-1=未倒计时)
 static bool    s_blink_visible = true;          // 最后10秒闪烁的可见状态 (true=亮, false=灭)
 static int64_t s_last_blink_toggle_ms = 0;      // 上次闪烁切换时间戳 (ms)
+
+// ---- 顶部时间显示状态 ----
+// 记录上次渲染的时间字符串，用于检测分钟变化时强制刷新 (时间每秒/每分变化)
+static char s_last_time_str[32] = {0};
 
 // 创建主页面控件
 static void ui_create_main_page(void) {
@@ -174,15 +179,43 @@ static int timer_remaining_seconds(const thermostat_dev_t *dev) {
     return (int)((remaining_ms + 999) / 1000); // 向上取整到秒
 }
 
+// 获取本地时间并格式化为 "YYYY-MM-DD HH:MM" 字符串
+// 时区已在 main.c 中通过 setenv("TZ", "AEST-10AEDT,...") 设置为
+// 澳大利亚东部标准时间 (AEST/AEDT)，localtime() 会自动应用夏令时。
+// 若系统时间尚未同步，则返回占位字符串。
+static void format_local_time(char *buf, size_t len) {
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    if (now == (time_t)-1 || !localtime_r(&now, &timeinfo)) {
+        snprintf(buf, len, "----/--/-- --:--");
+        return;
+    }
+
+    // 判断系统时间是否已同步：若年份 < 2024，说明系统时间仍停留在 Unix 纪元
+    // (1970-01-01)，即 NTP 尚未成功同步。此时直接显示会错误地呈现为
+    // "1970-01-01 11:00" (AEST UTC+10)，因此显示占位符。
+    // 说明：时间同步可能由 lwIP SNTP 客户端 (esp_sntp) 或 main.c 中的自定义
+    // NTP 同步 (settimeofday) 完成，二者都会写入系统时间，因此这里直接依据
+    // 系统时间是否合理来判断，而不依赖 esp_sntp_get_sync_status()。
+    if (timeinfo.tm_year + 1900 < 2024) {
+        snprintf(buf, len, "----/--/-- --:--");
+        return;
+    }
+
+    // 格式：YYYY-MM-DD HH:MM (与需求文档 5.2 节一致)
+    strftime(buf, len, "%Y-%m-%d %H:%M", &timeinfo);
+}
+
 // 更新主页面显示内容
 static void ui_update_main_page(void) {
     char buf[64];
 
     // 顶部信息栏：左侧日期时间，右侧 Wi-Fi 符号 (靠最右)
-    // 由于未接入 RTC/网络时间，此处显示固定占位时间，
+    // 时间通过 SNTP 同步并转换为澳大利亚东部标准时间 (AEST/AEDT，自动夏令时)，
     // Wi-Fi 状态使用 LVGL 内置符号 LV_SYMBOL_WIFI (U+F1EB)，
     // 该符号已包含在 lv_font_montserrat_20 字库中，无需额外加载字体。
-    lv_label_set_text(s_lbl_time, "2026-08-11 10:30");
+    format_local_time(buf, sizeof(buf));
+    lv_label_set_text(s_lbl_time, buf);
     lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI);
 
     // 当前室温 (保留 1 位小数)
@@ -236,8 +269,10 @@ static void ui_update_main_page(void) {
 static void ui_update_standby_page(void) {
     char buf[64];
 
-    // 顶部信息栏 (Wi-Fi 状态使用 LVGL 内置符号 LV_SYMBOL_WIFI)
-    lv_label_set_text(s_lbl_time, "2026-08-11 10:30");
+    // 顶部信息栏 (时间显示澳大利亚东部标准时间 AEST/AEDT，自动夏令时；
+    // Wi-Fi 状态使用 LVGL 内置符号 LV_SYMBOL_WIFI)
+    format_local_time(buf, sizeof(buf));
+    lv_label_set_text(s_lbl_time, buf);
     lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI);
 
     // 当前室温 (中号字)
@@ -410,6 +445,19 @@ void lcd_display_update(thermostat_dev_t *dev) {
         dev->mode != s_last_mode ||
         remaining_sec != s_last_timer_remaining_sec) {
         changed = true;
+    }
+
+    // 检测顶部时间变化 (分钟变化时强制刷新，使时间显示保持最新)
+    // 注意：仅在开机/待机主页面显示时间，Sleep Timer 设置页不显示时间，
+    // 但为简单起见统一检测，刷新开销可忽略。
+    {
+        char now_time[32];
+        format_local_time(now_time, sizeof(now_time));
+        if (strcmp(now_time, s_last_time_str) != 0) {
+            strncpy(s_last_time_str, now_time, sizeof(s_last_time_str) - 1);
+            s_last_time_str[sizeof(s_last_time_str) - 1] = '\0';
+            changed = true;
+        }
     }
 
     // 最后10秒闪烁逻辑：亮0.5s / 灭0.5s

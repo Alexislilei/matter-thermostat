@@ -38,3 +38,11 @@ CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_32=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
+
+# SNTP 时间同步配置
+# 1) 允许 4 个 SNTP 服务器 (2 个域名 + 2 个 IP，IP 可绕过 DNS 解析失败)
+CONFIG_LWIP_SNTP_MAX_SERVERS=4
+# 2) 缩短 SNTP 重试间隔 (15 秒，Kconfig 允许的最小值)。默认 1 小时，
+#    若首次同步时 Wi-Fi 尚未连接，会导致时间长时间停留在占位符；
+#    缩短后可在网络就绪后快速重试同步。
+CONFIG_LWIP_SNTP_UPDATE_DELAY=15000

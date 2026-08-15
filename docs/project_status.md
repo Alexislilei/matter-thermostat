@@ -165,6 +165,72 @@
 
 > **诊断结论（重要）**：根据用户提供的实际崩溃日志，崩溃监控显示复位原因为 **POWERON（上电）**，而非 PANIC/WDT。但该复位原因可能因开发者在崩溃后拔插 USB 重连串口而被覆盖。为规避此问题，已新增 **NVS 历史记录**（见上文），即使拔插 USB 也能追溯真实崩溃原因。初步判断倾向硬件供电问题（进入配网模式时 Wi-Fi + BLE + Matter 同时工作产生峰值电流），但需结合 NVS 历史与 Core Dump 进一步确认。
 
+### 3.13 顶部时间显示改为澳大利亚东部标准时间（AEST/AEDT，自动夏令时）（已完成）
+原顶部信息栏时间显示为固定占位字符串 `"2026-08-11 10:30"`（未接入 RTC/网络时间）。现改为通过 **SNTP 网络校时** 获取 UTC 时间，并转换为 **澳大利亚东部标准时间**（AEST/AEDT，自动夏令时）显示：
+
+1. **`main/main.c`**：
+   - 新增 `time_sync_init()`：通过 `setenv("TZ", "AEST-10AEDT,M10.1.0,M4.1.0/3", 1)` + `tzset()` 设置时区（POSIX 时区字符串，libc 自动在 AEST UTC+10 与 AEDT UTC+11 间切换）。
+   - 初始化 SNTP（`esp_sntp`，`SNTP_OPMODE_POLL`），服务器依次为 `pool.ntp.org` / `time.google.com` / `time.nist.gov`。
+   - 在 `app_main()` 中 Matter/Wi-Fi 网络就绪后调用 `time_sync_init()`。
+   - `main/CMakeLists.txt` 的 REQUIRES 中新增 `lwip`（ESP-IDF v5.1 中 `esp_sntp.h` 由 `lwip` 组件提供）。
+2. **`components/lcd_display/lcd_display.c`**：
+   - 新增 `format_local_time()`：用 `localtime_r()` 将系统时间（UTC）转换为本地时间，`strftime` 格式化为 `YYYY-MM-DD HH:MM`；SNTP 未同步时显示占位 `----/--/-- --:--`。
+   - 主页面与待机页顶部时间均改用 `format_local_time()` 输出，替换原硬编码占位字符串。
+   - 在 `lcd_display_update()` 中新增时间变化检测：分钟变化时强制刷新 UI，保证时间实时更新。
+
+> **说明**：`esp_sntp` 在 `SNTP_OPMODE_POLL` 模式下更新系统时间时会调用 `settimeofday()`，从而触发 `tzset()` 重新计算夏令时，实现 AEST/AEDT 自动切换。
+
+### 3.14 修复时间显示为 1970-01-01 11:00（已完成）
+**现象**：调试发现顶部时间显示为 `1970-01-01 11:00`。
+
+**根因**：ESP32 系统时间在 SNTP 同步完成前停留在 Unix 纪元（`1970-01-01 00:00 UTC`）。原 [`format_local_time()`](components/lcd_display/lcd_display.c:186) 仅判断 `time(NULL) == -1`（该条件在 ESP32 上永远不会触发），未检查 SNTP 是否已同步，因此在 SNTP 未完成（或失败）时，将纪元时间按 AEST（UTC+10）转换显示为 `1970-01-01 11:00`。
+
+**修复**：
+1. **`components/lcd_display/lcd_display.c`**：
+   - 新增 `#include "esp_sntp.h"`。
+   - 修改 [`format_local_time()`](components/lcd_display/lcd_display.c:186)：在格式化前先检查 `esp_sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED`，若 SNTP 未同步则显示占位符 `----/--/-- --:--`，同步完成后才显示真实时间。
+2. **`components/lcd_display/CMakeLists.txt`**：REQUIRES 中新增 `lwip`（ESP-IDF v5.1 中 `esp_sntp.h` 由 `lwip` 组件提供）。
+
+**验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 25%）。
+
+### 3.15 修复配网成功后日期时间栏仍显示占位符（已完成）
+**现象**：配网成功后，顶部日期时间栏仍显示占位符 `----/--/-- --:--`，不显示真实时间。
+
+**根因分析**（SNTP 校时未完成）：
+1. **SNTP 初始化时机过早**：原代码在 [`app_main()`](main/main.c) 启动时（`app_matter_init()` 之后）就调用 `time_sync_init()`，但此时设备**尚未连接 Wi-Fi**（Matter 配网通过 BLE 进行，Wi-Fi 凭证在配网过程中才被下发）。SNTP 首次 NTP 请求因无网络路由而失败。
+2. **SNTP 重试间隔过长**：`CONFIG_LWIP_SNTP_UPDATE_DELAY` 默认值为 **1 小时**（3600000ms）。在 `SNTP_OPMODE_POLL` 模式下，首次同步失败后需等待该时长才重试。即使之后配网成功、Wi-Fi 就绪，SNTP 也要等最多 1 小时才重试，导致时间长时间停留在占位符。
+3. **SNTP 服务器数量不匹配**：代码设置了 3 个服务器（`pool.ntp.org` / `time.google.com` / `time.nist.gov`），但 `CONFIG_LWIP_SNTP_MAX_SERVERS` 默认为 1。
+
+**修复**：
+1. **`main/main.c`**：
+   - 新增 `wifi_got_ip_event_handler()`：监听 `IP_EVENT_STA_GOT_IP` 事件，在设备获得 IP 地址后触发 `time_sync_init()`，确保 SNTP 在 Wi-Fi 真正就绪后再同步。
+   - 在 `app_main()` 中注册该事件处理器（`esp_event_handler_register`）。
+   - 将 `time_sync_init()` 改为可安全多次调用（新增 `s_sntp_started` 保护）：首次调用执行 `esp_sntp_init()`，后续调用通过 `esp_sntp_restart()` 重新触发同步。
+   - **新增 `ensure_time_synced()` 兜底机制**：在 `temp_control_task` 中周期性调用，若检测到 SNTP 尚未同步且 Wi-Fi STA 已连接（`esp_netif_is_netif_up`），则节流（至少 15 秒）后重新触发 SNTP 同步。此机制作为 GOT_IP 事件处理的兜底，解决 Matter 内部管理 Wi-Fi 连接时事件可能不投递到默认事件循环的问题。
+   - **SNTP 服务器列表扩充为 4 个**：前两个为域名（`pool.ntp.org` / `time.google.com`），后两个为直接 IP（`216.239.35.0` = time.google.com、`129.6.15.28` = time.nist.gov），可绕过 DNS 解析失败的问题（适用于设备仅有链路本地 IPv6、无法解析公网域名但能访问公网 IP 的场景）。
+   - **诊断日志**：`ensure_time_synced()` 中打印当前 SNTP 同步状态（status 值）与 STA 接口 IP，便于定位 NTP 失败原因。
+   - **新增 NTP 故障诊断（`run_ntp_diagnostics()` / `diag_test_dns()` / `diag_raw_ntp_request()`）**：SNTP 客户端内部不打印具体错误，因此新增独立诊断手段，在 SNTP 长时间未同步时（节流 60 秒）分别测试：
+     1. **DNS 解析**：`getaddrinfo()` 解析 `pool.ntp.org` / `time.google.com`，判断 DNS 是否正常。
+     2. **原始 UDP NTP 请求**：直接向 IP 服务器（`216.239.35.0` / `129.6.15.28`）发送 48 字节 NTP 请求并等待响应（3 秒超时），绕过 SNTP 客户端，验证 UDP 123 端口是否可达。
+     通过对比这两项结果，可精确定位失败环节是 **DNS 解析失败**、**UDP 123 端口被阻断**，还是 **SNTP 客户端本身异常**。
+   - **新增自定义 NTP 同步（`custom_ntp_sync()` / `custom_ntp_request()`）**：诊断证实 DNS 与原始 UDP NTP 请求均正常，但 lwIP SNTP 客户端始终无法同步，因此**彻底绕开 lwIP SNTP 客户端**，改用与诊断相同的、已验证可用的原始 UDP socket 方式直接获取 NTP 时间并调用 `settimeofday()` 设置系统时间。依次尝试 IP 直连服务器（`216.239.35.0` / `129.6.15.28`）与域名服务器（`pool.ntp.org` / `time.google.com`），节流 10 秒，成功即停止。设置 `s_time_synced` 标志。
+2. **`sdkconfig.defaults` / `sdkconfig`**：
+   - `CONFIG_LWIP_SNTP_MAX_SERVERS=4`：与代码中 4 个服务器匹配。
+   - `CONFIG_LWIP_SNTP_UPDATE_DELAY=15000`：将重试间隔从 1 小时缩短到 15 秒（Kconfig 允许的最小值），网络就绪后能快速重试同步。
+3. **`components/lcd_display/lcd_display.c`**：
+   - **`format_local_time()` 改为依据系统时间是否合理来判断是否显示占位符**：不再依赖 `esp_sntp_get_sync_status()`（因为自定义 NTP 同步通过 `settimeofday()` 设置系统时间，不会更新 lwIP SNTP 状态）。改为检查 `localtime_r()` 得到的年份是否 < 2024（即系统时间仍停留在 Unix 纪元 1970），若是则显示占位符，否则显示真实时间。这样无论时间由 lwIP SNTP 还是自定义 NTP 同步完成，都能正确显示。
+
+**验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 24%）。需烧录并联网后验证配网成功后时间能正常显示为澳大利亚东部标准时间。
+
+> **诊断结论（重要，已定位根因）**：根据用户提供的串口日志，SNTP 已被周期性重新触发，但 `esp_sntp_get_sync_status()` 始终未变为 `COMPLETED`（status 一直为 0 = `SNTP_SYNC_STATUS_RESET`）。新增的 `[DIAG]` 日志给出了决定性证据：
+> ```
+> [DIAG] DNS OK: pool.ntp.org -> 119.18.6.37
+> [DIAG] DNS OK: time.google.com -> 216.239.35.4
+> [DIAG] NTP RESPONSE from 216.239.35.0: 48 bytes (LI=0, VN=4, Mode=4)
+> [DIAG] NTP RESPONSE from 129.6.15.28: 48 bytes (LI=0, VN=3, Mode=4)
+> ```
+> 这证明 **DNS 解析正常**、**UDP 123 端口未被阻断**（原始 NTP 请求能收到有效服务器响应 Mode=4），但 **lwIP SNTP 客户端本身异常**（很可能是启动时网络未就绪即调用 `esp_sntp_init()`，之后 `esp_sntp_restart()` 无法正确恢复客户端状态）。因此改用**自定义 NTP 同步**（原始 UDP socket + `settimeofday()`）彻底绕开有问题的 SNTP 客户端，并修改 `format_local_time()` 依据系统时间合理性判断是否显示占位符。
+
 ---
 
 ## 4. 未完成 / 待处理事项
@@ -175,6 +241,7 @@
 ### 4.2 待验证事项
 - ~~烧录后验证屏幕实际显示温控器页面~~（**已完成**：屏幕显示正常，黑底白字、方向正确、TEMP 标签正确，见 3.8 节）。
 - ~~Sleep Timer 设置页的 UI 尚未在 `lcd_display.c` 中实现~~（**已完成**：见 3.10 节，已实现标题 + 4 选项高亮渲染，编译通过）。
+- **顶部时间显示（AEST/AEDT）**：需烧录并联网后验证 SNTP 校时成功、时间显示为澳大利亚东部标准时间，且夏令时切换（AEST↔AEDT）正确（见 3.13 节）。**已修复配网成功后时间仍显示占位符的问题**（见 3.15 节：改为 Wi-Fi 获得 IP 后触发 SNTP 同步，并缩短重试间隔），需烧录联网后最终验证。
 - 触摸屏（XPT2046）驱动尚未实现（当前仅实现显示，未实现触控输入）。
 
 ---

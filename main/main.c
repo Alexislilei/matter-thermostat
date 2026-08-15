@@ -1,8 +1,19 @@
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <inttypes.h>
+#include <sys/time.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_sntp.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 
@@ -15,6 +26,344 @@
 #include "crash_monitor.h"
 
 static const char *TAG = "MAIN";
+
+// ---- 时间同步配置 ----
+// 目标时区：澳大利亚东部标准时间 (AEST/AEDT)，自动夏令时。
+// 使用 IANA 时区名 "Australia/Sydney"，libc 会根据日期自动在
+// AEST (UTC+10) 与 AEDT (UTC+11) 之间切换。
+#define TIMEZONE_AUSTRALIA_SYDNEY "AEST-10AEDT,M10.1.0,M4.1.0/3"
+// SNTP 服务器列表 (依次尝试)
+// 前两个为域名（依赖 DNS 解析），后两个为直接 IP（可绕过 DNS 解析失败的问题，
+// 适用于设备仅有链路本地 IPv6、无法解析公网域名，但能访问公网 IP 的场景）。
+// 注意：CONFIG_LWIP_SNTP_MAX_SERVERS 需 >= 本数组长度 (当前为 4)。
+static const char *SNTP_SERVERS[] = {
+    "pool.ntp.org",
+    "time.google.com",
+    "216.239.35.0",   // time.google.com 的 NTP 服务器 IP
+    "129.6.15.28",    // time.nist.gov 的 NTP 服务器 IP
+};
+
+// 初始化 SNTP 时间同步并设置时区
+// 说明：ESP-IDF 的 newlib 支持 POSIX 时区字符串。为获得自动夏令时，
+// 需同时满足：
+//   1) 通过 setenv("TZ", ...) + tzset() 设置时区；
+//   2) 通过 esp_sntp_setoperatingmode(SNTP_OPMODE_POLL) 使 SNTP 更新
+//      系统时间时调用 settimeofday()，从而触发 tzset() 重新计算夏令时。
+// 标记 SNTP 是否已初始化，避免重复初始化 (esp_sntp_init 重复调用会报错)
+static bool s_sntp_started = false;
+
+// 初始化 SNTP 时间同步并设置时区
+// 说明：ESP-IDF 的 newlib 支持 POSIX 时区字符串。为获得自动夏令时，
+// 需同时满足：
+//   1) 通过 setenv("TZ", ...) + tzset() 设置时区；
+//   2) 通过 esp_sntp_setoperatingmode(SNTP_OPMODE_POLL) 使 SNTP 更新
+//      系统时间时调用 settimeofday()，从而触发 tzset() 重新计算夏令时。
+// 该函数可安全地多次调用（内部有 s_sntp_started 保护），
+// 以便在 Wi-Fi 获得 IP 后重新触发 SNTP 同步。
+static void time_sync_init(void) {
+    // 1. 设置时区为澳大利亚东部标准时间 (AEST/AEDT，自动夏令时)
+    setenv("TZ", TIMEZONE_AUSTRALIA_SYDNEY, 1);
+    tzset();
+
+    // 2. 初始化 SNTP，从网络获取 UTC 时间
+    //    仅在首次调用时执行初始化；后续调用仅重新触发同步，
+    //    避免 esp_sntp_init() 重复调用导致错误。
+    if (!s_sntp_started) {
+        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, SNTP_SERVERS[0]);
+        esp_sntp_setservername(1, SNTP_SERVERS[1]);
+        esp_sntp_setservername(2, SNTP_SERVERS[2]);
+        esp_sntp_set_time_sync_notification_cb(NULL);
+        esp_sntp_init();
+        s_sntp_started = true;
+        ESP_LOGI(TAG, "SNTP time sync initialized (timezone: Australia/Sydney, AEST/AEDT auto DST)");
+    } else {
+        // 已初始化过：重新触发一次同步，确保在 Wi-Fi 就绪后能尽快获取时间
+        esp_sntp_restart();
+        ESP_LOGI(TAG, "SNTP time sync re-triggered after network ready");
+    }
+}
+
+// Wi-Fi 事件处理：当设备获得 IP 地址 (STA_GOT_IP) 时触发 SNTP 时间同步。
+// 根因：原代码在 app_main() 启动时（此时 Wi-Fi 尚未连接）就调用 time_sync_init()，
+// 导致 SNTP 首次请求因无网络而失败；而 CONFIG_LWIP_SNTP_UPDATE_DELAY 默认 1 小时，
+// 重试间隔过长，即使之后配网成功，时间也长时间停留在占位符。
+// 通过监听 IP_EVENT_STA_GOT_IP，在 Wi-Fi 真正就绪后再触发 SNTP，即可正常同步时间。
+static void wifi_got_ip_event_handler(void *arg, esp_event_base_t event_base,
+                                      int32_t event_id, void *event_data) {
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    ESP_LOGI(TAG, "Wi-Fi connected, got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    time_sync_init();
+}
+
+// 上次触发 SNTP 重新同步的时间戳 (ms)，用于节流，避免频繁重启 SNTP 干扰同步
+static int64_t s_last_sntp_retry_ms = 0;
+
+// 前向声明：NTP 故障诊断函数与自定义 NTP 同步函数（定义在下方），
+// 均在 ensure_time_synced 中调用
+static void run_ntp_diagnostics(void);
+static void custom_ntp_sync(void);
+
+// 周期性检查并确保 SNTP 时间同步完成。
+// 作为 IP_EVENT_STA_GOT_IP 事件处理的兜底方案：某些情况下（如 Matter 内部
+// 管理 Wi-Fi 连接、或事件未投递到默认事件循环），GOT_IP 事件可能不会触发
+// 我们的处理器。此函数在 temp_control_task 中周期性调用，若检测到 SNTP
+// 尚未同步且 Wi-Fi 已连接，则重新触发 SNTP 同步，确保时间最终能同步成功。
+// 返回 true 表示时间已同步完成。
+static bool ensure_time_synced(void) {
+    // 已同步完成，无需处理
+    if (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+        return true;
+    }
+
+    // 检查 Wi-Fi STA 接口是否已连接并获得 IP
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta && esp_netif_is_netif_up(sta)) {
+        // 打印当前 SNTP 同步状态与 STA 接口 IP，便于诊断 NTP 失败原因
+        esp_netif_ip_info_t ip_info;
+        char ip_str[32] = "none";
+        if (esp_netif_get_ip_info(sta, &ip_info) == ESP_OK) {
+            snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip_info.ip));
+        }
+        ESP_LOGI(TAG, "SNTP not synced (status=%d), STA IP=%s, re-triggering SNTP...",
+                 (int)esp_sntp_get_sync_status(), ip_str);
+
+        // Wi-Fi 已就绪但 SNTP 尚未同步：节流后重新触发同步
+        // (至少间隔 15 秒，避免频繁重启 SNTP 干扰同步)
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (now_ms - s_last_sntp_retry_ms >= 15000) {
+            s_last_sntp_retry_ms = now_ms;
+            time_sync_init();
+        }
+
+        // 周期性执行 NTP 故障诊断（内部节流 60 秒），定位 SNTP 无法同步的环节
+        run_ntp_diagnostics();
+
+        // 自定义 NTP 同步（绕过有问题的 lwIP SNTP 客户端）：
+        // 诊断已证实原始 UDP NTP 请求可用，因此直接通过 socket 获取时间并
+        // 调用 settimeofday() 设置系统时间，确保时间能最终同步成功。
+        custom_ntp_sync();
+    }
+    return false;
+}
+
+// ---- NTP 故障诊断 ----
+// 目的：当 SNTP 客户端始终无法同步（status 一直为 RESET）时，通过独立的
+// 诊断手段定位失败环节。SNTP 客户端内部不打印具体错误，因此这里分别测试：
+//   1) DNS 解析：能否将 "pool.ntp.org" / "time.google.com" 解析为 IP。
+//   2) 原始 UDP NTP 请求：直接向 IP 服务器 (216.239.35.0) 发送 NTP 请求，
+//      并等待响应，绕过 SNTP 客户端，验证 UDP 123 端口是否可达。
+// 通过对比这两项结果，可判断失败原因是 DNS、UDP 端口被阻断，还是 SNTP 客户端本身。
+// 该诊断仅在 SNTP 长时间未同步时周期性执行（节流 60 秒），避免刷屏。
+static int64_t s_last_ntp_diag_ms = 0;
+
+// 测试 DNS 解析是否正常
+static void diag_test_dns(void) {
+    const char *hosts[] = { "pool.ntp.org", "time.google.com" };
+    for (int i = 0; i < 2; i++) {
+        struct addrinfo hints;
+        struct addrinfo *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        int rc = getaddrinfo(hosts[i], NULL, &hints, &res);
+        if (rc == 0 && res) {
+            char ipbuf[INET6_ADDRSTRLEN] = "?";
+            if (res->ai_family == AF_INET) {
+                struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
+                inet_ntop(AF_INET, &sa->sin_addr, ipbuf, sizeof(ipbuf));
+            } else if (res->ai_family == AF_INET6) {
+                struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)res->ai_addr;
+                inet_ntop(AF_INET6, &sa6->sin6_addr, ipbuf, sizeof(ipbuf));
+            }
+            ESP_LOGI(TAG, "[DIAG] DNS OK: %s -> %s", hosts[i], ipbuf);
+            freeaddrinfo(res);
+        } else {
+            ESP_LOGE(TAG, "[DIAG] DNS FAIL: %s (rc=%d, errno=%d)", hosts[i], rc, errno);
+        }
+    }
+}
+
+// 直接向指定 IP 发送原始 NTP 请求并等待响应，验证 UDP 123 端口可达性
+// 返回 true 表示收到有效 NTP 响应
+static bool diag_raw_ntp_request(const char *ip_str) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "[DIAG] socket() failed: errno=%d", errno);
+        return false;
+    }
+
+    // 构造 NTP 请求包 (48 字节)：首字节 0x23 = LI=0, VN=4, Mode=3 (client)
+    uint8_t ntp_pkt[48];
+    memset(ntp_pkt, 0, sizeof(ntp_pkt));
+    ntp_pkt[0] = 0x23;
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(123);
+    dest.sin_addr.s_addr = inet_addr(ip_str);
+
+    struct timeval tv;
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    int sent = sendto(sock, ntp_pkt, sizeof(ntp_pkt), 0,
+                      (struct sockaddr *)&dest, sizeof(dest));
+    if (sent < 0) {
+        ESP_LOGE(TAG, "[DIAG] NTP sendto %s failed: errno=%d", ip_str, errno);
+        close(sock);
+        return false;
+    }
+
+    uint8_t rbuf[48];
+    socklen_t addrlen = sizeof(dest);
+    int recvd = recvfrom(sock, rbuf, sizeof(rbuf), 0,
+                         (struct sockaddr *)&dest, &addrlen);
+    close(sock);
+
+    if (recvd < 0) {
+        ESP_LOGE(TAG, "[DIAG] NTP recvfrom %s failed/timeout: errno=%d", ip_str, errno);
+        return false;
+    }
+    ESP_LOGI(TAG, "[DIAG] NTP RESPONSE from %s: %d bytes (LI=%d, VN=%d, Mode=%d)",
+             ip_str, recvd, (rbuf[0] >> 6) & 0x3, (rbuf[0] >> 3) & 0x7, rbuf[0] & 0x7);
+    return true;
+}
+
+// 执行 NTP 故障诊断（节流 60 秒）
+static void run_ntp_diagnostics(void) {
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - s_last_ntp_diag_ms < 60000) {
+        return;
+    }
+    s_last_ntp_diag_ms = now_ms;
+
+    ESP_LOGI(TAG, "[DIAG] === NTP 故障诊断开始 ===");
+    diag_test_dns();
+    diag_raw_ntp_request("216.239.35.0");   // time.google.com NTP IP
+    diag_raw_ntp_request("129.6.15.28");    // time.nist.gov NTP IP
+    ESP_LOGI(TAG, "[DIAG] === NTP 故障诊断结束 ===");
+}
+
+// ---- 自定义 NTP 时间同步（绕过 lwIP SNTP 客户端） ----
+// 背景：诊断已证实 DNS 解析正常、原始 UDP NTP 请求能收到有效服务器响应
+// (Mode=4)，但 lwIP 的 esp_sntp 客户端始终无法完成同步 (status 一直为 RESET)。
+// 这说明问题出在 SNTP 客户端本身（很可能是启动时网络未就绪即调用
+// esp_sntp_init()，之后 esp_sntp_restart() 无法正确恢复客户端状态）。
+// 因此这里改用与诊断相同的、已验证可用的原始 UDP socket 方式直接获取
+// NTP 时间并调用 settimeofday() 设置系统时间，彻底绕开有问题的 SNTP 客户端。
+// 该函数可安全地多次调用，内部节流（至少间隔 10 秒）避免频繁请求。
+static bool s_time_synced = false;   // 自定义时间同步是否已完成
+static int64_t s_last_custom_sync_ms = 0;
+
+// 向指定服务器发送 NTP 请求并解析响应中的发送时间戳，成功则设置系统时间
+// 返回 true 表示成功获取并设置了系统时间
+static bool custom_ntp_request(const char *ip_str) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "[NTP] socket() failed: errno=%d", errno);
+        return false;
+    }
+
+    // 构造 NTP 请求包 (48 字节)：首字节 0x23 = LI=0, VN=4, Mode=3 (client)
+    uint8_t ntp_pkt[48];
+    memset(ntp_pkt, 0, sizeof(ntp_pkt));
+    ntp_pkt[0] = 0x23;
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(123);
+    dest.sin_addr.s_addr = inet_addr(ip_str);
+
+    struct timeval tv;
+    tv.tv_sec = 3;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    int sent = sendto(sock, ntp_pkt, sizeof(ntp_pkt), 0,
+                      (struct sockaddr *)&dest, sizeof(dest));
+    if (sent < 0) {
+        ESP_LOGE(TAG, "[NTP] sendto %s failed: errno=%d", ip_str, errno);
+        close(sock);
+        return false;
+    }
+
+    uint8_t rbuf[48];
+    socklen_t addrlen = sizeof(dest);
+    int recvd = recvfrom(sock, rbuf, sizeof(rbuf), 0,
+                         (struct sockaddr *)&dest, &addrlen);
+    close(sock);
+
+    if (recvd < 48) {
+        ESP_LOGE(TAG, "[NTP] recvfrom %s failed/short: errno=%d, recvd=%d", ip_str, errno, recvd);
+        return false;
+    }
+
+    // 校验响应模式：Mode 应为 4 (server)
+    if ((rbuf[0] & 0x07) != 4) {
+        ESP_LOGE(TAG, "[NTP] %s: unexpected mode %d", ip_str, rbuf[0] & 0x07);
+        return false;
+    }
+
+    // 解析发送时间戳 (Transmit Timestamp)：位于偏移 40-47 字节，为 64 位 NTP 时间戳
+    // 高 32 位为自 1900-01-01 起的秒数，低 32 位为小数部分
+    uint32_t tx_sec = ((uint32_t)rbuf[40] << 24) | ((uint32_t)rbuf[41] << 16) |
+                      ((uint32_t)rbuf[42] << 8) | (uint32_t)rbuf[43];
+
+    // NTP 纪元 (1900-01-01) 与 Unix 纪元 (1970-01-01) 之间的秒数差
+    const uint32_t NTP_TO_UNIX = 2208988800UL;
+
+    // 防止异常值：若秒数小于 NTP_TO_UNIX 则明显无效
+    if (tx_sec < NTP_TO_UNIX) {
+        ESP_LOGE(TAG, "[NTP] %s: invalid transmit timestamp (sec=%" PRIu32 ")", ip_str, tx_sec);
+        return false;
+    }
+
+    time_t unix_time = (time_t)(tx_sec - NTP_TO_UNIX);
+
+    // 设置系统时间 (UTC)
+    struct timeval tv_now;
+    tv_now.tv_sec = unix_time;
+    tv_now.tv_usec = 0;
+    if (settimeofday(&tv_now, NULL) != 0) {
+        ESP_LOGE(TAG, "[NTP] settimeofday failed: errno=%d", errno);
+        return false;
+    }
+
+    s_time_synced = true;
+    ESP_LOGI(TAG, "[NTP] Time synced via %s: %lld (UTC)", ip_str, (long long)unix_time);
+    return true;
+}
+
+// 自定义 NTP 同步入口：依次尝试多个服务器，成功即返回
+// 内部节流（至少间隔 10 秒），避免频繁请求
+static void custom_ntp_sync(void) {
+    if (s_time_synced) {
+        return;
+    }
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - s_last_custom_sync_ms < 10000) {
+        return;
+    }
+    s_last_custom_sync_ms = now_ms;
+
+    // 依次尝试：先 IP 直连（已验证可用），再域名（依赖 DNS）
+    const char *servers[] = {
+        "216.239.35.0",   // time.google.com NTP IP
+        "129.6.15.28",    // time.nist.gov NTP IP
+        "pool.ntp.org",
+        "time.google.com",
+    };
+    for (int i = 0; i < 4; i++) {
+        if (custom_ntp_request(servers[i])) {
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "[NTP] All NTP servers failed, will retry later");
+}
 
 // 硬件引脚定义
 #define GPIO_POWER_BTN      GPIO_NUM_19
@@ -47,6 +396,10 @@ static void temp_control_task(void *pvParameters) {
     while (1) {
         // ---- 崩溃监控心跳：周期性记录运行时长快照，便于崩溃后定位时间点 ----
         crash_monitor_heartbeat(60000);   // 每 60 秒打印一次心跳日志
+
+        // ---- SNTP 时间同步兜底 ----
+        // 若 SNTP 尚未同步且 Wi-Fi 已连接，周期性重新触发同步（内部已节流）。
+        ensure_time_synced();
 
         // ---- 温度采集与温控 ----
         esp_err_t err = dht11_read_filtered(&s_dht11, &temp_val);
@@ -224,6 +577,18 @@ void app_main(void) {
 
     // 8. 初始化 Matter 协议栈
     ESP_ERROR_CHECK(app_matter_init(&s_thermostat));
+
+    // 8.1 注册 Wi-Fi 事件处理：当设备获得 IP 地址后触发 SNTP 时间同步。
+    //     注意：Matter 配网通过 BLE 进行，Wi-Fi 凭证在配网过程中才被下发，
+    //     因此启动时设备尚无网络连接。若在启动时直接调用 time_sync_init()，
+    //     SNTP 首次请求会因无网络而失败，且重试间隔长达 1 小时，导致时间长时间
+    //     停留在占位符。改为在 IP_EVENT_STA_GOT_IP 事件触发后再同步时间。
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                               &wifi_got_ip_event_handler, NULL));
+
+    // 8.2 预先设置时区并初始化 SNTP 客户端（此时 Wi-Fi 可能尚未连接，
+    //     首次同步会失败；待 GOT_IP 事件触发后会自动重新同步）。
+    time_sync_init();
 
     // 默认为开机模式
     thermostat_set_mode(&s_thermostat, THERMOSTAT_MODE_ON);
