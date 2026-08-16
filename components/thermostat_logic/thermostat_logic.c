@@ -1,8 +1,17 @@
 #include "thermostat_logic.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "THERMOSTAT_LOGIC";
+
+// ---- Sleep Timer 设定值 NVS 持久化 ----
+// 需求：Sleep Timer 时长设置改动后记忆，下次上电读取记忆的设置。
+// 首次开机默认 30 分钟。
+#define SLEEP_TIMER_NVS_NAMESPACE "sleep_timer"
+#define SLEEP_TIMER_NVS_KEY       "setting"   // 设定值 (i32, 分钟)
+#define SLEEP_TIMER_DEFAULT_MIN   30          // 首次开机默认 30 分钟
 
 esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     if (!dev) return ESP_ERR_INVALID_ARG;
@@ -19,7 +28,9 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     dev->last_input_time_ms = 0;
 
     // Sleep Timer 初始化
-    dev->sleep_timer_setting = 0;
+    // 首次开机默认 30 分钟 (无 OFF 选项)。若 NVS 中已有记忆值，
+    // 由 thermostat_sleep_timer_load() 在启动时覆盖。
+    dev->sleep_timer_setting = SLEEP_TIMER_DEFAULT_MIN;
     dev->sleep_timer_active = false;
     dev->sleep_timer_start_ms = 0;
 
@@ -118,8 +129,8 @@ void thermostat_factory_reset(thermostat_dev_t *dev) {
     dev->current_page = UI_PAGE_MAIN;
     dev->last_input_time_ms = 0;
 
-    // 清空 Sleep Timer 状态
-    dev->sleep_timer_setting = 0;
+    // 清空 Sleep Timer 状态 (恢复默认 30 分钟)
+    dev->sleep_timer_setting = SLEEP_TIMER_DEFAULT_MIN;
     dev->sleep_timer_active = false;
     dev->sleep_timer_start_ms = 0;
 
@@ -142,4 +153,66 @@ void thermostat_sleep_timer_tick(thermostat_dev_t *dev) {
         dev->sleep_timer_start_ms = 0;
         thermostat_set_mode(dev, THERMOSTAT_MODE_STANDBY);
     }
+}
+
+// 从 NVS 读取记忆的 Sleep Timer 设定值并应用到 dev->sleep_timer_setting
+// 若 NVS 中无有效记录（首次开机），保持默认值 (30 分钟)。
+esp_err_t thermostat_sleep_timer_load(thermostat_dev_t *dev) {
+    if (!dev) return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SLEEP_TIMER_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        // 命名空间不存在（首次开机）：保持默认值
+        ESP_LOGI(TAG, "Sleep Timer NVS namespace not found, using default %d min",
+                 SLEEP_TIMER_DEFAULT_MIN);
+        return ESP_OK;
+    }
+
+    int32_t setting = 0;
+    err = nvs_get_i32(handle, SLEEP_TIMER_NVS_KEY, &setting);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        // 键不存在（首次开机）：保持默认值
+        ESP_LOGI(TAG, "Sleep Timer setting not found in NVS, using default %d min",
+                 SLEEP_TIMER_DEFAULT_MIN);
+        return ESP_OK;
+    }
+
+    // 校验设定值合法性：仅接受 {10, 30, 60, 90}，否则回退默认
+    if (setting != 10 && setting != 30 && setting != 60 && setting != 90) {
+        ESP_LOGW(TAG, "Invalid saved Sleep Timer setting %d, using default %d min",
+                 (int)setting, SLEEP_TIMER_DEFAULT_MIN);
+        return ESP_OK;
+    }
+
+    dev->sleep_timer_setting = (int)setting;
+    ESP_LOGI(TAG, "Sleep Timer setting loaded from NVS: %d min", dev->sleep_timer_setting);
+    return ESP_OK;
+}
+
+// 将 dev->sleep_timer_setting 保存到 NVS，实现"改动后记忆，下次上电读取"
+esp_err_t thermostat_sleep_timer_save(const thermostat_dev_t *dev) {
+    if (!dev) return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SLEEP_TIMER_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS namespace '%s': %d", SLEEP_TIMER_NVS_NAMESPACE, err);
+        return err;
+    }
+
+    err = nvs_set_i32(handle, SLEEP_TIMER_NVS_KEY, (int32_t)dev->sleep_timer_setting);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Sleep Timer setting saved to NVS: %d min", dev->sleep_timer_setting);
+    } else {
+        ESP_LOGE(TAG, "Failed to save Sleep Timer setting to NVS: %d", err);
+    }
+    return err;
 }

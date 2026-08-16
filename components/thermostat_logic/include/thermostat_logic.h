@@ -67,7 +67,9 @@ typedef struct {
     int64_t last_input_time_ms;   // 最后一次操作时间戳 (ms)，用于非主页面 60s 超时返回
 
     // ---- Sleep Timer 定时睡眠 ----
-    int sleep_timer_setting;      // 设定值 (0=OFF, 10, 30, 60 分钟)
+    // 设定值可选: 10, 30, 60, 90 分钟 (无 OFF 选项)。
+    // 首次开机默认 30 分钟，改动后记忆 (NVS 持久化)，下次上电读取记忆值。
+    int sleep_timer_setting;      // 设定值 (10, 30, 60, 90 分钟)
     bool sleep_timer_active;      // 是否正在倒计时
     int64_t sleep_timer_start_ms; // 倒计时开始时间戳 (ms)
 } thermostat_dev_t;
@@ -106,6 +108,27 @@ void thermostat_factory_reset(thermostat_dev_t *dev);
  *        倒计时结束后自动切换至待机模式并停止定时器
  */
 void thermostat_sleep_timer_tick(thermostat_dev_t *dev);
+
+/**
+ * @brief 从 NVS 读取记忆的 Sleep Timer 设定值并应用到 dev->sleep_timer_setting
+ *
+ * 若 NVS 中无有效记录（首次开机），则保持默认值 (30 分钟)。
+ * 调用前需确保 NVS 已初始化 (nvs_flash_init)。
+ *
+ * @param dev 温控器设备状态指针
+ * @return esp_err_t ESP_OK 表示成功
+ */
+esp_err_t thermostat_sleep_timer_load(thermostat_dev_t *dev);
+
+/**
+ * @brief 将 dev->sleep_timer_setting 保存到 NVS，实现"改动后记忆，下次上电读取"
+ *
+ * 调用前需确保 NVS 已初始化 (nvs_flash_init)。
+ *
+ * @param dev 温控器设备状态指针
+ * @return esp_err_t ESP_OK 表示成功
+ */
+esp_err_t thermostat_sleep_timer_save(const thermostat_dev_t *dev);
 
 #ifdef __cplusplus
 }

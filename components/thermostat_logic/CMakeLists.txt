@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "thermostat_logic.c"
     INCLUDE_DIRS "include"
-    REQUIRES driver esp_timer
+    REQUIRES driver esp_timer nvs_flash
 )

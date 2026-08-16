@@ -394,8 +394,9 @@ static void custom_ntp_sync(void) {
 #define TIMER_BTN_Y_MIN     250
 #define TIMER_BTN_Y_MAX     320
 
-// Timer 按钮倒计时时长 (分钟)
-#define TIMER_BTN_COUNTDOWN_MIN  30
+// 说明：Timer 按钮 (右下角触摸) 启动倒计时时，使用当前记忆的 Sleep Timer
+// 设定值 (dev->sleep_timer_setting，默认 30 分钟，可在 Sleep Timer 设置页调整)，
+// 不再使用固定时长。
 
 static thermostat_dev_t s_thermostat;
 static dht11_config_t s_dht11;
@@ -644,15 +645,16 @@ static void touch_poll_task(void *pvParameters) {
                         // 倒计时进行中 -> 关闭倒计时
                         s_thermostat.sleep_timer_active = false;
                         s_thermostat.sleep_timer_start_ms = 0;
-                        s_thermostat.sleep_timer_setting = 0;
                         ESP_LOGI(TAG, "Touch Timer button -> Countdown OFF");
                     } else {
-                        // 未倒计时 -> 开启 30 分钟倒计时
-                        s_thermostat.sleep_timer_setting = TIMER_BTN_COUNTDOWN_MIN;
+                        // 未倒计时 -> 使用当前记忆的 Sleep Timer 设定值启动倒计时
+                        // 需求：触发 sleeper 启动的只有屏上右下角的触摸按键。
+                        // 设定值由 Sleep Timer 设置页 (FUNC 进入) 通过编码器调整，
+                        // 改动后记忆 (NVS)，此处直接使用 dev->sleep_timer_setting。
                         s_thermostat.sleep_timer_active = true;
                         s_thermostat.sleep_timer_start_ms = now_ms;
                         ESP_LOGI(TAG, "Touch Timer button -> %d min countdown started",
-                                 TIMER_BTN_COUNTDOWN_MIN);
+                                 s_thermostat.sleep_timer_setting);
                     }
                 }
             } else if (!in_btn && point.touched) {
@@ -761,6 +763,11 @@ void app_main(void) {
 
     // 3. 初始化核心逻辑与加热器 GPIO
     ESP_ERROR_CHECK(thermostat_init(&s_thermostat, GPIO_HEATER_RELAY));
+
+    // 3.1 从 NVS 读取记忆的 Sleep Timer 设定值
+    //     需求：Sleep Timer 时长设置改动后记忆，下次上电读取记忆的设置。
+    //     首次开机无记录时保持默认值 (30 分钟)。
+    thermostat_sleep_timer_load(&s_thermostat);
 
     // 4. 初始化 DHT11 传感器
     ESP_ERROR_CHECK(dht11_init(&s_dht11, GPIO_DHT11_DATA));

@@ -164,8 +164,10 @@ void button_handler_poll(void) {
             thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_ON);
         } else if (s_thermostat->mode == THERMOSTAT_MODE_ON) {
             if (s_thermostat->current_page == UI_PAGE_SLEEP_TIMER) {
-                // Sleep Timer 设置页面：循环选择睡眠时间 (OFF -> 10 -> 30 -> 60 MIN)
-                static const int sleep_options[] = {0, 10, 30, 60};
+                // Sleep Timer 设置页面：选择睡眠时长 (10 -> 30 -> 60 -> 90 MIN)
+                // 需求：顺时针旋转一格，列表向上移动一位 (选中项向后移动)，
+                //      到最后一个 (90 MIN) 就停住，不做周期循环；逆时针反之。
+                static const int sleep_options[] = {10, 30, 60, 90};
                 const int num_options = sizeof(sleep_options) / sizeof(sleep_options[0]);
 
                 int idx = 0;
@@ -175,10 +177,18 @@ void button_handler_poll(void) {
                         break;
                     }
                 }
-                // 顺时针 +1，逆时针 -1，循环切换
-                idx = (idx + encoder_direction + num_options) % num_options;
-                s_thermostat->sleep_timer_setting = sleep_options[idx];
-                ESP_LOGI(TAG, "Sleep Timer option selected: %d MIN", s_thermostat->sleep_timer_setting);
+                // 顺时针 +1，逆时针 -1，并在两端钳制 (不循环)
+                int new_idx = idx + encoder_direction;
+                if (new_idx < 0)      new_idx = 0;
+                if (new_idx > num_options - 1) new_idx = num_options - 1;
+
+                if (new_idx != idx) {
+                    s_thermostat->sleep_timer_setting = sleep_options[new_idx];
+                    ESP_LOGI(TAG, "Sleep Timer option selected: %d MIN",
+                             s_thermostat->sleep_timer_setting);
+                    // 改动后记忆：保存到 NVS，下次上电读取
+                    thermostat_sleep_timer_save(s_thermostat);
+                }
             } else {
                 // 主页面：调整目标温度 (encoder_direction 绝对值 = 卡点数)
                 // 每卡点改变 0.5℃ (需求变更: 由 1.0℃ 改为 0.5℃)
@@ -250,20 +260,11 @@ void button_handler_poll(void) {
                         s_thermostat->current_page = UI_PAGE_SLEEP_TIMER;
                         ESP_LOGI(TAG, "FUNC press -> Enter SLEEP TIMER SETTING page");
                     } else {
-                        // Sleep Timer 设置页 -> 主页面，确认选择并开始倒计时
+                        // Sleep Timer 设置页 -> 主页面
+                        // 注意：FUNC 按键仅负责页面切换，不在此处启动倒计时。
+                        // 触发 sleeper 启动的只有屏上右下角的触摸按键。
                         s_thermostat->current_page = UI_PAGE_MAIN;
-                        if (s_thermostat->sleep_timer_setting > 0) {
-                            s_thermostat->sleep_timer_active = true;
-                            s_thermostat->sleep_timer_start_ms = now_ms;
-                            ESP_LOGI(TAG, "Sleep Timer confirmed: %d MIN countdown started",
-                                     s_thermostat->sleep_timer_setting);
-                        } else {
-                            // OFF：取消定时
-                            s_thermostat->sleep_timer_active = false;
-                            s_thermostat->sleep_timer_start_ms = 0;
-                            ESP_LOGI(TAG, "Sleep Timer set to OFF (disabled)");
-                        }
-                        ESP_LOGI(TAG, "FUNC press -> Back to MAIN page");
+                        ESP_LOGI(TAG, "FUNC press -> Back to MAIN page (countdown not started)");
                     }
                 }
             }

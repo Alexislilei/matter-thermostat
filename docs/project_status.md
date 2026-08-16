@@ -109,14 +109,44 @@
 ### 3.10 实现 Sleep Timer 设置页 UI（已完成）
 在 `components/lcd_display/lcd_display.c` 中实现了 Sleep Timer 设置页的完整 UI 渲染：
 
-1. **新增控件句柄**：`s_lbl_sleep_title`（页面标题）与 `s_lbl_sleep_options[4]`（4 个选项标签）。
-2. **新增 `ui_create_sleep_timer_page()`**：创建页面标题 `SLEEP TIMER SETTING`（顶部居中，20 号字）及 4 个纵向排列的选项标签（`OFF` / `10 MIN` / `30 MIN` / `60 MIN`，24 号字），默认隐藏。
-3. **新增 `ui_update_sleep_timer_page()`**：根据 `sleep_timer_setting` 高亮当前选中项（白色），其余选项置灰（`0x555555`）。
+1. **新增控件句柄**：`s_lbl_sleep_title`（页面标题）、`s_sleep_opt_box[4]`（4 个选项容器）与 `s_lbl_sleep_options[4]`（4 个选项文字标签）。
+2. **新增 `ui_create_sleep_timer_page()`**：创建页面标题 `SLEEP TIMER SETTING`（顶部居中，20 号字）及 4 个纵向排列的选项容器（`10 MIN` / `30 MIN` / `60 MIN` / `90 MIN`，24 号字），默认隐藏。
+3. **新增 `ui_update_sleep_timer_page()`**：选中项始终居中显示（白底黑字 + 边框，即正常显示的反转），未选中项透明背景 + 灰色文字（`0x555555`）；列表随选中项滚动（间距 40px），若选项会阻挡页面标题或超出屏幕底部则隐藏该选项。
 4. **修改 `ui_render()`**：新增 `UI_PAGE_SLEEP_TIMER` 分支——隐藏主页面/待机页元素，显示 Sleep Timer 设置页控件；主页面与待机页分支同时隐藏 Sleep Timer 控件，避免页面残留。
 5. **修改 `lcd_display_init()`**：在创建主页面控件后调用 `ui_create_sleep_timer_page()`。
 6. **构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 26%）。
 
-> 说明：页面切换、编码器循环选择（OFF -> 10 -> 30 -> 60 MIN）、60s 超时返回主页面等逻辑已在 `components/button_handler/button_handler.c` 中实现，本次仅补齐了对应的 UI 渲染层。
+> 说明：页面切换、编码器非循环选择（10 -> 30 -> 60 -> 90 MIN，到两端停住）、60s 超时返回主页面等逻辑已在 `components/button_handler/button_handler.c` 中实现，本次仅补齐了对应的 UI 渲染层。
+
+### 3.10.1 Sleep Timer 功能重构（已完成）
+对 Sleep Timer 功能进行重构，调整触发方式、选项、默认值与记忆逻辑：
+
+1. **触发方式调整**：仅屏上右下角的触摸按键触发 sleeper（睡眠定时）启动；实体 FUNC 按键仅将主页面切换到 Sleep Timer 时长设置页，不再启动倒计时。
+2. **选项调整**：移除 `OFF` 选项，改为 `10 MIN` / `30 MIN` / `60 MIN` / `90 MIN`。
+3. **默认值**：第一次开机默认值为 `30 MIN`（`thermostat_init` 与恢复出厂均设为 30）。
+4. **记忆功能（NVS 持久化）**：
+   - 新增 `thermostat_sleep_timer_save()` / `thermostat_sleep_timer_load()`（`components/thermostat_logic/thermostat_logic.c`），使用命名空间 `sleep_timer`、键 `setting`。
+   - 编码器改动设定值后立即保存；`main.c` 上电初始化后调用 `thermostat_sleep_timer_load()` 读取记忆值。
+   - `thermostat_logic/CMakeLists.txt` 增加 `nvs_flash` 依赖。
+5. **编码器逻辑**：顺时针旋转选中项向后移动（列表上移），到 `90 MIN` 停住；逆时针反之，到 `10 MIN` 停住，不做周期移动。
+6. **触摸按键逻辑**：`main.c` 中触摸按键启动倒计时时使用 `sleep_timer_setting`（记忆值），关闭时不再清零设定值。
+
+### 3.10.2 Sleep Timer 标题栏与校准页显示优化（已完成）
+1. **Sleep Timer 标题栏蓝底白字**：将 `s_lbl_sleep_title` 由普通标签改为带蓝色背景（`0x0055AA`）的容器（`lv_obj`，宽 240、高 36），内部放置白色文字标签 `SLEEP TIMER SETTING`；`SLEEP_TITLE_BOTTOM` 相应调整为 76，避免选项阻挡标题栏。
+2. **校准页隐藏非校准内容**：新增 `ui_calib_hide_all_normal()` / `ui_calib_restore_all_normal()`，在 `lcd_display_calib_show()` 中隐藏所有非校准相关内容（日期时间、Wi-Fi 符号、室温、设定温度、加热状态、Timer 按钮、待机文字、Sleep Timer 标题与选项），在 `lcd_display_calib_hide()` 中恢复，交由 `ui_render()` 按当前页面状态统一管理。
+
+### 3.10.3 Sleep Timer 页与主页面 UI 微调（已完成）
+1. **Sleep Timer 选项列表整体下移**：将 `SLEEP_OPT_CENTER_Y` 由 160 调整为 182（先下移半个字体高度 12px，再按反馈下移 10px，共 22px）。
+2. **Sleep Timer 标题改为蓝底黑字**：标题栏背景仍为蓝色（`0x0055AA`），内部文字颜色由白色改为黑色。
+3. **Sleep Timer 标题栏上移至日期下方**：标题栏由 `LV_ALIGN_TOP_MID, 0, 40` 上移至 `LV_ALIGN_TOP_MID, 0, 30`（紧贴顶部日期/时间栏下方，蓝色底不遮挡日期与时间）；同步将 `SLEEP_TITLE_BOTTOM` 由 76 调整为 66，保证选项隐藏判定与新标题位置一致。
+4. **修复 90MIN 选项被误隐藏**：将 `SLEEP_SCREEN_BOTTOM` 由 300 调整为 302。选中 `10 MIN` 时 `90 MIN` 选项中心位于 302（框底 320 恰好贴屏幕底），原阈值 300 会将其误隐藏，现可正常显示。
+5. **校准页标题位置调整**：将 `TOUCH CALIBRATION` 标题由顶部（`LV_ALIGN_TOP_MID, 0, 20`）改为屏幕中间偏上（`LV_ALIGN_CENTER, 0, -60`，y=100），位于中间提示文字（y=160）上方，避免重叠。
+6. **主页面 Timer 按钮加高并改为多行**：
+   - 按钮高度由 44 增至 88（下边位置不动，只向上增加）。
+   - 按钮内部文字颜色改为**黑色**。
+   - 上半部分两行标题：新增 `s_lbl_timer_title`（第一行 `SLEEP`，16 号字）与 `s_lbl_timer_title2`（第二行 `TIMER`，16 号字），保持原字体。
+   - 下半部分：原 `s_lbl_timer`（24 号字，黑色），未开启显示 `OFF`，倒计时中显示 `mm:ss`。
+   - `ui_update_main_page()` 中未开启文字由 `TIMER: OFF` 改为 `OFF`。
 
 ### 3.11 修复长时间运行后约 15 分钟自动重启问题（已完成）
 **现象**：设备长时间开机后（约 15 分钟，时间不精确）必定自动重启；重启瞬间串口打印中断、无特殊报错 log，Ubuntu 侧串口需重新设置。
@@ -248,7 +278,39 @@
 
 **构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 24%）。`touch_driver.c` / `lcd_display.c` 编译链接无错误，仅存在 CHIP/Matter 托管组件既有的 C++20 比较警告（与本次改动无关）。
 
-> **待验证**：首次烧录后应自动进入校准流程，依次点击四角后参数写入 NVS；重启后应跳过校准直接进入主界面。若某角采样无效（轴范围 < 50）会返回错误并重新等待该角输入。
+**硬件验证（2026-08-16，已完成）**：
+- **首次开机校准通过**：校准页面正常显示，依次点击四角后校准完成，参数写入 NVS。
+- **坐标映射准确**：点击右下角 Timer 按钮位置，映射坐标稳定在 `x≈188~201, y=319`，落在 Timer 按钮区域（`x:120~240, y:250~320`）内。
+- **Timer 按钮点击正常**：按下-释放后成功触发点击，打印 `Touch Timer button -> Countdown OFF`（切换逻辑正确）。
+- **重启跳过校准**：reboot 后未再次进入校准流程，说明 NVS 中的"已校准"标记持久化生效。
+
+> **遗留说明**：校准功能已通过硬件验证，工作正常。
+
+### 3.21 屏蔽触摸调试打印信息（已完成）
+**背景**：触摸校准与 Timer 按钮功能已通过硬件验证，为后续开发其它工作做准备，屏蔽触摸调试过程中使用的高频打印信息，仅保留必要的触摸日志。
+
+**移除的调试打印**：
+1. **`main/main.c` 的 `touch_poll_task`**：
+   - `[TOUCH] IRQ=%d`（每次轮询打印 IRQ 状态）
+   - `[DIAG] GPIO13(CS)=%d GPIO23(IRQ)=%d`（打印 CS/IRQ 物理电平）
+   - `[TOUCH] touched x=%d y=%d`（打印映射后的触摸坐标）
+2. **`components/touch_driver/touch_driver.c`**：
+   - `[DIAG] Touch CS GPIO%d...` / `[DIAG] Touch IRQ GPIO%d...`（初始化时打印引脚电平）
+   - `[DIAG] get_point: IRQ_level=%d CS_level=%d`（每次读取打印 IRQ/CS 电平）
+   - `[DIAG] raw: x=%u y=%u z1=%u z2=%u pressure=%d`（打印原始 ADC 值与压力）
+
+**保留的必要日志**：
+- `XPT2046 touch driver initialized...`（初始化确认）
+- `Loaded calibration from NVS...`（上电加载校准参数）
+- `Calibration saved to NVS...` / `Calibration computed...`（校准保存/计算）
+- `Touch Timer button -> ...`（Timer 按钮点击事件，功能日志）
+- 各类错误日志（NVS 失败、校准失败、SPI 失败等）
+
+**说明**：
+- `main/main.c` 中剩余的 `[DIAG]` 打印均为 **NTP 故障诊断**相关（`diag_test_dns()` 等），与触摸调试无关，未改动。
+- `GPIO_TOUCH_CS` / `GPIO_TOUCH_IRQ` 宏仍被 GPIO 配置与触摸初始化使用，无未使用告警。
+
+**构建验证**：`idf.py build` 编译通过（exit 0），`touch_driver.c` 与 `main.c` 重新编译链接无错误、无新增告警，生成 `build/matter-thermostat.bin`（app 分区剩余 24%）。触摸功能逻辑（校准、坐标映射、Timer 按钮点击）不受影响。
 
 ### 3.16 实现 XPT2046 触摸屏驱动 + Timer 按钮（已完成）
 新增 `components/touch_driver/` 组件实现 XPT2046 触摸屏驱动，并将主页面右下角 timer 区域改为可触摸的按钮：
@@ -332,9 +394,11 @@
 - **Timer 按钮功能未验证**：触摸驱动的 30 分钟倒计时按钮功能尚未在硬件上验证。
 
 ### 4.2 触摸屏当前状态（已更新）
-- **当前代码状态（2026-08-16）**：用户已在硬件上为 GPIO13 (Touch CS) 增加外部上拉电阻到 3.3V。`main/main.c` 中触摸驱动初始化与触摸轮询任务已**重新启用**（见 3.18 节），`touch_driver` 组件完整保留。构建通过，待烧录验证。
-- **新增触摸校准功能（见 3.20 节）**：已实现首次开机自动校准流程（四点角标）、校准参数与"已校准"标记的 NVS 持久化，以及后续上电按标记跳过/执行校准的逻辑。构建通过。
-- **下一步（新会话）**：烧录后观察 `[DIAG] Touch CS GPIO13: level` 是否恢复正常（应为 1）、LCD 是否仍显示异常、触摸坐标能否读取，验证 Timer 按钮功能，并验证首次开机校准流程（依次点击四角后参数写入 NVS，重启后跳过校准）。
+- **当前代码状态（2026-08-16）**：用户已在硬件上为 GPIO13 (Touch CS) 增加外部上拉电阻到 3.3V。`main/main.c` 中触摸驱动初始化与触摸轮询任务已**重新启用**（见 3.18 节），`touch_driver` 组件完整保留。
+- **触摸校准功能（见 3.20 节，已完成）**：已实现首次开机自动校准流程（四点角标）、校准参数与"已校准"标记的 NVS 持久化，以及后续上电按标记跳过/执行校准的逻辑。**已通过硬件验证**：首次开机校准通过、坐标映射准确、Timer 按钮点击正常、重启后跳过校准。
+- **调试打印已屏蔽（见 3.21 节，已完成）**：触摸调试用的高频打印（`[TOUCH] IRQ` / `[DIAG] GPIO13(CS)` / `[TOUCH] touched` / `[DIAG] get_point` / `[DIAG] raw` 等）已移除，仅保留必要的触摸日志（初始化、校准加载/保存、Timer 按钮点击、错误日志）。
+- **需求文档已更新**：`docs/01_requirements.md` 新增 `5.3 触摸屏校准需求` 小节，记录首次开机校准、参数持久化、后续上电跳过校准及校准期间交互隔离等需求。
+- **下一步（新会话）**：触摸功能已基本完成，可继续后续开发工作（如其它触摸交互、页面功能等）。
 
 ## 5. 关键文件清单
 
@@ -352,15 +416,13 @@
 
 ## 6. 新会话接手建议
 
-### 6.1 触摸屏调试（最高优先级）
-1. **优先排查 GPIO13 初始化电平异常**：`[DIAG] Touch CS GPIO13: level=0`，即使代码显式置 1 仍读到 0。检查：
-   - GPIO13 是否与其它外设/功能冲突（如 JTAG、其它 SPI 片选）。
-   - 外部接线是否正确（触摸 CS 是否真正连接到 GPIO13）。
-   - 是否缺少上拉电阻（所有 LCD/触摸 GPIO 均无外部上拉，需内部上拉）。
-2. **排查触摸 SPI 事务干扰 LCD 显示**：共享 SPI2_HOST 总线的仲裁 / CS 时序问题。可尝试：
-   - 触摸事务期间强制拉高 LCD CS（`lcd_cs_gpio` 字段已实现）。
-   - 检查 SPI 总线锁（`spi_bus_lock`）是否正确使用。
-3. **恢复触摸代码顺序**：先解决显示异常 → 再解决坐标读取 → 最后验证 Timer 按钮功能。
+### 6.1 触摸屏功能（已完成，可继续后续开发）
+触摸屏功能已基本完成并通过硬件验证：
+- **触摸驱动**：XPT2046 触摸检测、坐标读取、压力检测均正常（见 3.16 / 3.19 节）。
+- **触摸校准**：首次开机自动校准、参数 NVS 持久化、后续上电跳过校准均正常（见 3.20 节）。
+- **Timer 按钮**：右下角 Timer 按钮触摸点击（30 分钟倒计时开关）正常（见 3.16 节）。
+- **调试打印**：触摸调试用高频打印已屏蔽，仅保留必要日志（见 3.21 节）。
+- **遗留**：GPIO13 (CS) 软件读 0 但万用表读高的现象仍存在（见 3.17 节），但不影响触摸功能，属独立既有问题，可暂不处理。
 
 ### 6.2 硬件接线确认
 - LCD：SCK=12, MOSI=11, MISO=10, CS=2, DC=3, RESET=1, BL=0

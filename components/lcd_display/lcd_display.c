@@ -44,13 +44,26 @@ static lv_obj_t *s_lbl_room_temp;   // 当前室温大字
 static lv_obj_t *s_lbl_room_label;  // "TEMP" 标签
 static lv_obj_t *s_lbl_set_temp;    // 设定温度
 static lv_obj_t *s_lbl_heat;        // 加热状态
-static lv_obj_t *s_lbl_timer;       // 定时状态 (Timer 按钮内的文字)
+static lv_obj_t *s_lbl_timer;       // 定时状态 (Timer 按钮内下半部分文字: OFF 或倒计时)
+static lv_obj_t *s_lbl_timer_title; // Timer 按钮内上半部分第一行标题 (SLEEP)
+static lv_obj_t *s_lbl_timer_title2;// Timer 按钮内上半部分第二行标题 (TIMER)
 static lv_obj_t *s_btn_timer;       // 右下角 Timer 按钮 (触摸区域)
 static lv_obj_t *s_lbl_standby;     // 待机页 STANDBY 文字
 
 // ---- Sleep Timer 设置页控件 ----
+// 每个选项由一个带边框的容器 (s_sleep_opt_box) + 内部文字标签 (s_lbl_sleep_options) 组成。
+// 选中项居中显示，白底黑字 + 边框；未选中项透明背景 + 灰色文字。
 static lv_obj_t *s_lbl_sleep_title;      // 页面标题 "SLEEP TIMER SETTING"
-static lv_obj_t *s_lbl_sleep_options[4]; // 4 个选项标签 (OFF / 10 MIN / 30 MIN / 60 MIN)
+static lv_obj_t *s_sleep_opt_box[4];     // 4 个选项容器 (10 / 30 / 60 / 90 MIN)
+static lv_obj_t *s_lbl_sleep_options[4]; // 4 个选项文字标签
+
+// ---- Sleep Timer 设置页布局常量 ----
+#define SLEEP_OPT_CENTER_Y   182   // 选中项始终位于屏幕中部偏下 (竖屏高 320)，较原位置整体下移 (12px + 10px)
+#define SLEEP_OPT_SPACING    40    // 选项垂直间距 (px)
+#define SLEEP_OPT_BOX_W      120   // 选项框宽度 (px)
+#define SLEEP_OPT_BOX_H      36    // 选项框高度 (px)
+#define SLEEP_TITLE_BOTTOM   66    // 标题栏下边界：选项中心 Y 小于此值则隐藏 (避免阻挡蓝底标题栏)
+#define SLEEP_SCREEN_BOTTOM  302   // 屏幕下边界：选项中心 Y 大于此值则隐藏 (302 为 90MIN 选项中心，其框底恰好贴屏幕底 320)
 
 // ---- 触摸校准页面控件 ----
 static lv_obj_t *s_calib_title;          // 校准页面标题
@@ -125,10 +138,14 @@ static void ui_create_main_page(void) {
 
     // 右侧：Timer 按钮 (触摸区域)
     // 需求：屏幕最下面右边 timer 区域变成一个最简单的 button，
-    // 触摸按下该按钮开启 30 分钟倒计时，再按下关闭倒计时。
-    // 使用 LVGL 按钮控件 (lv_btn) 作为触摸区域，内部放置定时状态文字。
+    // 触摸按下该按钮开启倒计时，再按下关闭倒计时。
+    // 使用 LVGL 按钮控件 (lv_btn) 作为触摸区域。
+    // 按钮高度为原来的 2 倍 (44 -> 88)，下边位置不动，只向上增加。
+    // 按钮内部文字颜色为黑色，分为上下两部分：
+    //   上半部分两行标题：第一行 "SLEEP"，第二行 "TIMER" (16 号字，保持原字体)。
+    //   下半部分：显示 "OFF" 或倒计时时间 (24 号字，保持原字体)。
     s_btn_timer = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(s_btn_timer, 110, 44);
+    lv_obj_set_size(s_btn_timer, 110, 88);
     lv_obj_align(s_btn_timer, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
     // 按钮样式：深色背景 + 边框，使其看起来像一个可点击的按钮
     lv_obj_set_style_bg_color(s_btn_timer, lv_color_hex(0x1A1A2E), 0);
@@ -137,11 +154,25 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_radius(s_btn_timer, 6, 0);
     lv_obj_set_style_pad_all(s_btn_timer, 0, 0);
 
-    // 按钮内部：定时状态文字 (字母与数字颜色均设为白色)
+    // 按钮上半部分第一行：标题 "SLEEP" (16 号字，黑色)
+    s_lbl_timer_title = lv_label_create(s_btn_timer);
+    lv_obj_set_style_text_font(s_lbl_timer_title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_timer_title, lv_color_black(), 0);
+    lv_label_set_text(s_lbl_timer_title, "SLEEP");
+    lv_obj_align(s_lbl_timer_title, LV_ALIGN_TOP_MID, 0, 2);
+
+    // 按钮上半部分第二行：标题 "TIMER" (16 号字，黑色)
+    s_lbl_timer_title2 = lv_label_create(s_btn_timer);
+    lv_obj_set_style_text_font(s_lbl_timer_title2, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_timer_title2, lv_color_black(), 0);
+    lv_label_set_text(s_lbl_timer_title2, "TIMER");
+    lv_obj_align(s_lbl_timer_title2, LV_ALIGN_TOP_MID, 0, 20);
+
+    // 按钮下半部分：定时状态文字 (OFF 或倒计时时间，黑色)
     s_lbl_timer = lv_label_create(s_btn_timer);
     lv_obj_set_style_text_font(s_lbl_timer, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(s_lbl_timer, lv_color_white(), 0);
-    lv_obj_center(s_lbl_timer);
+    lv_obj_set_style_text_color(s_lbl_timer, lv_color_black(), 0);
+    lv_obj_align(s_lbl_timer, LV_ALIGN_BOTTOM_MID, 0, -4);
 
     // 待机页 STANDBY 文字 (默认隐藏)
     s_lbl_standby = lv_label_create(lv_scr_act());
@@ -152,28 +183,55 @@ static void ui_create_main_page(void) {
 }
 
 // 创建 Sleep Timer 设置页控件
-// 布局：顶部标题 + 4 个纵向排列的选项 (OFF / 10 MIN / 30 MIN / 60 MIN)
+// 布局：顶部标题 + 4 个纵向排列的选项 (10 / 30 / 60 / 90 MIN)。
+// 选中项始终居中显示，白底黑字 + 边框；未选中项透明背景 + 灰色文字。
+// 列表随选中项滚动：顺时针旋转选中项向后移动 (列表上移)，逆时针反之，
+// 到两端停住 (不循环)。若选项会阻挡页面标题或超出屏幕底部，则隐藏该选项。
 static void ui_create_sleep_timer_page(void) {
-    static const char *option_texts[4] = {"OFF", "10 MIN", "30 MIN", "60 MIN"};
+    static const char *option_texts[4] = {"10 MIN", "30 MIN", "60 MIN", "90 MIN"};
 
-    // 页面标题 (顶部居中)
-    // 注意：主页面顶部信息栏 (时间/Wi-Fi) 位于 0-30px 区域，
-    // 标题需放在时间那一行的下方 (y=40)，避免与时间显示重叠。
-    s_lbl_sleep_title = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_sleep_title, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_lbl_sleep_title, lv_color_white(), 0);
-    lv_label_set_text(s_lbl_sleep_title, "SLEEP TIMER SETTING");
-    lv_obj_align(s_lbl_sleep_title, LV_ALIGN_TOP_MID, 0, 40);
+    // 页面标题栏 (顶部居中，蓝底黑字)
+    // 注意：主页面顶部信息栏 (时间/Wi-Fi) 位于 0-30px 区域 (日期/时间 20 号字，
+    // 底部约在 y=26)。标题栏上移并紧贴日期下方 (y=30)，避免蓝色底挡住日期/时间。
+    // 标题栏为一个带蓝色背景的容器 (lv_obj)，内部放置黑色文字标签。
+    s_lbl_sleep_title = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_lbl_sleep_title, LCD_H_RES, 36);
+    lv_obj_set_style_bg_color(s_lbl_sleep_title, lv_color_hex(0x0055AA), 0);
+    lv_obj_set_style_bg_opa(s_lbl_sleep_title, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_lbl_sleep_title, 0, 0);
+    lv_obj_set_style_radius(s_lbl_sleep_title, 0, 0);
+    lv_obj_set_style_pad_all(s_lbl_sleep_title, 0, 0);
+    lv_obj_align(s_lbl_sleep_title, LV_ALIGN_TOP_MID, 0, 30);
 
-    // 4 个选项标签 (纵向排列，居中)
+    // 标题栏内部文字 (黑色)
+    lv_obj_t *title_lbl = lv_label_create(s_lbl_sleep_title);
+    lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title_lbl, lv_color_black(), 0);
+    lv_label_set_text(title_lbl, "SLEEP TIMER SETTING");
+    lv_obj_center(title_lbl);
+
+    // 4 个选项：每个选项为一个带边框的容器 (lv_obj)，内部放置文字标签。
+    // 选中项居中显示，白底黑字 + 边框；未选中项透明背景 + 灰色文字。
     for (int i = 0; i < 4; i++) {
-        s_lbl_sleep_options[i] = lv_label_create(lv_scr_act());
+        // 选项容器 (边框/背景框)
+        s_sleep_opt_box[i] = lv_obj_create(lv_scr_act());
+        lv_obj_set_size(s_sleep_opt_box[i], SLEEP_OPT_BOX_W, SLEEP_OPT_BOX_H);
+        // 默认透明背景、无边框 (选中时再设置为白底黑字 + 边框)
+        lv_obj_set_style_bg_color(s_sleep_opt_box[i], lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(s_sleep_opt_box[i], LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_sleep_opt_box[i], 0, 0);
+        lv_obj_set_style_radius(s_sleep_opt_box[i], 4, 0);
+        lv_obj_set_style_pad_all(s_sleep_opt_box[i], 0, 0);
+
+        // 选项文字标签 (容器内部居中)
+        s_lbl_sleep_options[i] = lv_label_create(s_sleep_opt_box[i]);
         lv_obj_set_style_text_font(s_lbl_sleep_options[i], &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_hex(0x555555), 0);
         lv_label_set_text(s_lbl_sleep_options[i], option_texts[i]);
-        // 纵向排列：从屏幕中部开始，每个选项间隔 40px
-        lv_obj_align(s_lbl_sleep_options[i], LV_ALIGN_CENTER, 0, -60 + i * 40);
+        lv_obj_center(s_lbl_sleep_options[i]);
+
         // 默认隐藏，进入该页面时才显示
-        lv_obj_add_flag(s_lbl_sleep_options[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -181,12 +239,13 @@ static void ui_create_sleep_timer_page(void) {
 // 布局：全屏覆盖，顶部标题 + 中间提示文字 + 当前角点目标 (十字准星)
 // 校准页面在进入校准模式时显示，覆盖主页面/待机页等所有普通 UI。
 static void ui_create_calib_page(void) {
-    // 页面标题 (顶部居中)
+    // 页面标题 (中间偏上位置，位于提示文字上方，避免重叠)
+    // 提示文字位于屏幕中部 (LV_ALIGN_CENTER, y=160)，标题放在其上方 (y=100)。
     s_calib_title = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_font(s_calib_title, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_calib_title, lv_color_white(), 0);
     lv_label_set_text(s_calib_title, "TOUCH CALIBRATION");
-    lv_obj_align(s_calib_title, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_align(s_calib_title, LV_ALIGN_CENTER, 0, -60);
     lv_obj_add_flag(s_calib_title, LV_OBJ_FLAG_HIDDEN);
 
     // 提示文字 (屏幕中部)
@@ -240,11 +299,48 @@ static void ui_update_calib_page(void) {
     lv_label_set_text(s_calib_hint, hint_text[idx]);
 }
 
+// 隐藏所有非校准相关的内容 (日期时间 / Wi-Fi / 温度 / 按钮 / 待机 / Sleep Timer 等)
+// 校准页面为全屏覆盖，避免普通 UI 元素残留干扰校准显示。
+static void ui_calib_hide_all_normal(void) {
+    lv_obj_add_flag(s_lbl_time, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_wifi, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_room_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_room_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_btn_timer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < 4; i++) {
+        lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// 恢复所有普通 UI 元素的可见性 (交由 ui_render() 按当前页面状态统一管理)
+static void ui_calib_restore_all_normal(void) {
+    lv_obj_clear_flag(s_lbl_time, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_wifi, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_room_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_room_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_btn_timer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
+    for (int i = 0; i < 4; i++) {
+        lv_obj_clear_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 // 显示触摸校准页面（覆盖普通 UI）
 void lcd_display_calib_show(void) {
     if (!s_disp) return;
     lvgl_port_lock(0);
     s_calib_active = true;
+    // 隐藏所有非校准内容，仅保留校准页面
+    ui_calib_hide_all_normal();
     lv_obj_clear_flag(s_calib_title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_calib_hint, LV_OBJ_FLAG_HIDDEN);
     ui_update_calib_page();
@@ -259,6 +355,8 @@ void lcd_display_calib_hide(void) {
     lv_obj_add_flag(s_calib_title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_calib_hint, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_calib_target, LV_OBJ_FLAG_HIDDEN);
+    // 恢复普通 UI 元素可见性，由 ui_render() 按当前页面状态统一管理
+    ui_calib_restore_all_normal();
     lvgl_port_unlock();
 }
 
@@ -272,18 +370,53 @@ void lcd_display_calib_set_step(touch_calib_step_t step) {
 }
 
 // 更新 Sleep Timer 设置页显示内容
-// 根据当前 sleep_timer_setting 高亮对应的选项 (白色加粗/高亮)，其余选项置灰
+// 需求：
+//   1. 选中项始终显示在屏幕中间位置，文本外有一个框，颜色为正常显示的反转 (白底黑字)。
+//   2. 选项列表从上到下顺序为 10 / 30 / 60 / 90。
+//   3. 顺时针旋转编码器一格，整个列表向上移动一个位次 (选中项向后移动)，
+//      到最后一个就停住，不周期移动；逆时针反之。
+//   4. 若向上移动后最上面的空间不够 (不能阻挡页面标题)，则最上面一个选项不显示；反之亦然。
 static void ui_update_sleep_timer_page(void) {
-    // 选项值与 sleep_timer_setting 的映射: {0, 10, 30, 60}
-    static const int option_values[4] = {0, 10, 30, 60};
+    // 选项值 (分钟) 与索引的映射: {10, 30, 60, 90}
+    static const int option_values[4] = {10, 30, 60, 90};
 
+    // 找到当前选中项的索引
+    int sel = 0;
     for (int i = 0; i < 4; i++) {
         if (s_dev->sleep_timer_setting == option_values[i]) {
-            // 当前选中项：高亮 (白色)
-            lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_white(), 0);
+            sel = i;
+            break;
+        }
+    }
+
+    for (int i = 0; i < 4; i++) {
+        // 计算该选项相对选中项的垂直偏移 (选中项居中，列表随选中项滚动)
+        int offset = i - sel;
+        lv_coord_t center_y = SLEEP_OPT_CENTER_Y + offset * SLEEP_OPT_SPACING;
+
+        // 若选项会阻挡页面标题 (中心 Y 过小) 或超出屏幕底部，则隐藏该选项
+        if (center_y < SLEEP_TITLE_BOTTOM || center_y > SLEEP_SCREEN_BOTTOM) {
+            lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_clear_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
+
+        // 定位选项框 (以屏幕中心为基准，垂直偏移 offset*SPACING)
+        lv_obj_align(s_sleep_opt_box[i], LV_ALIGN_CENTER, 0, center_y - SLEEP_OPT_CENTER_Y);
+
+        if (i == sel) {
+            // 选中项：白底黑字 + 边框 (正常显示的反转)
+            lv_obj_set_style_bg_opa(s_sleep_opt_box[i], LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(s_sleep_opt_box[i], lv_color_white(), 0);
+            lv_obj_set_style_border_width(s_sleep_opt_box[i], 2, 0);
+            lv_obj_set_style_border_color(s_sleep_opt_box[i], lv_color_white(), 0);
+            lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_black(), 0);
         } else {
-            // 未选中项：置灰
-            lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_hex(0x555555), 0);
+            // 未选中项：黑底白字 (需求：未选中时设置为黑底白字)
+            lv_obj_set_style_bg_opa(s_sleep_opt_box[i], LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(s_sleep_opt_box[i], lv_color_black(), 0);
+            lv_obj_set_style_border_width(s_sleep_opt_box[i], 0, 0);
+            lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_white(), 0);
         }
     }
 }
@@ -388,12 +521,17 @@ static void ui_update_main_page(void) {
     if (s_dev->is_heating) {
         lv_label_set_text(s_lbl_heat, "HEAT");
         lv_obj_set_style_text_color(s_lbl_heat, lv_color_hex(0xFF0000), 0);
+        // 加热中：透明背景 (不显示黑底)
+        lv_obj_set_style_bg_opa(s_lbl_heat, LV_OPA_TRANSP, 0);
     } else {
         lv_label_set_text(s_lbl_heat, "OFF");
-        lv_obj_set_style_text_color(s_lbl_heat, lv_color_hex(0x888888), 0);
+        // 需求：主页面最左下角的 OFF 设置为黑底白字
+        lv_obj_set_style_text_color(s_lbl_heat, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(s_lbl_heat, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(s_lbl_heat, lv_color_black(), 0);
     }
 
-    // 定时状态：倒计时中显示 mm:ss (仅数字)，未开启显示 TIMER: OFF
+    // 定时状态 (按钮第二行)：倒计时中显示 mm:ss (仅数字)，未开启显示 OFF
     if (s_dev->sleep_timer_active && s_dev->sleep_timer_setting > 0) {
         int remaining = timer_remaining_seconds(s_dev);
         if (remaining > 0) {
@@ -406,7 +544,7 @@ static void ui_update_main_page(void) {
         // 倒计时进行中：按钮边框高亮 (青色)，提示定时已开启
         lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x00FF7F), 0);
     } else {
-        snprintf(buf, sizeof(buf), "TIMER: OFF");
+        snprintf(buf, sizeof(buf), "OFF");
         // 未开启：按钮边框为默认青色
         lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x00BFFF), 0);
     }
@@ -451,7 +589,7 @@ static void ui_render(void) {
         // 隐藏 Sleep Timer 设置页控件
         lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
         for (int i = 0; i < 4; i++) {
-            lv_obj_add_flag(s_lbl_sleep_options[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
         }
         // 待机页室温与主页面一致，用超大号字 (48 号字)
         lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
@@ -472,7 +610,7 @@ static void ui_render(void) {
         // 显示 Sleep Timer 设置页控件
         lv_obj_clear_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
         for (int i = 0; i < 4; i++) {
-            lv_obj_clear_flag(s_lbl_sleep_options[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
         }
         ui_update_sleep_timer_page();
         return;
@@ -489,7 +627,7 @@ static void ui_render(void) {
     // 隐藏 Sleep Timer 设置页控件
     lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
     for (int i = 0; i < 4; i++) {
-        lv_obj_add_flag(s_lbl_sleep_options[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
     }
     lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
     ui_update_main_page();
