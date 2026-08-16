@@ -386,17 +386,6 @@ static void custom_ntp_sync(void) {
 #define GPIO_TOUCH_CS       GPIO_NUM_13  // 触摸屏片选 (XPT2046)
 #define GPIO_TOUCH_IRQ      GPIO_NUM_23  // 触摸屏中断 (Touch IRQ)
 
-// ---- 触摸屏 Timer 按钮区域 (屏幕右下角, 底部状态栏右侧) ----
-// 屏幕为竖屏 (宽 240, 高 320)。底部状态栏位于 y=250~320，
-// 右侧为 TIMER 显示区域。触摸该区域视为按下 Timer 按钮。
-#define TIMER_BTN_X_MIN     120
-#define TIMER_BTN_X_MAX     240
-#define TIMER_BTN_Y_MIN     250
-#define TIMER_BTN_Y_MAX     320
-
-// 说明：Timer 按钮 (右下角触摸) 启动倒计时时，使用当前记忆的 Sleep Timer
-// 设定值 (dev->sleep_timer_setting，默认 30 分钟，可在 Sleep Timer 设置页调整)，
-// 不再使用固定时长。
 
 static thermostat_dev_t s_thermostat;
 static dht11_config_t s_dht11;
@@ -602,70 +591,7 @@ static void touch_calibration_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-// 2.2 触摸屏轮询任务 (200ms 周期)
-// 读取 XPT2046 触摸点，检测右下角 Timer 按钮的"按下-释放"点击事件，
-// 点击一次开启 30 分钟倒计时，再次点击关闭倒计时。
-// 注意：触摸屏与 LCD 共用 SPI 总线，轮询周期不宜过短，否则会持续占用
-// 共享总线、干扰 LCD 帧刷新（导致白屏/横线）。200ms 周期在响应速度与
-// 总线占用之间取得平衡。
-static void touch_poll_task(void *pvParameters) {
-    // 触摸按下状态机：
-    //   s_touch_btn_pressed = true 表示手指当前按在 Timer 按钮区域内
-    //   当手指释放 (touched=false) 且之前按在按钮区域内时，触发一次点击
-    bool btn_pressed = false;
 
-    while (1) {
-        // 校准期间跳过 Timer 按钮处理，避免校准触摸被误判为按钮点击
-        if (s_touch_calibrating) {
-            vTaskDelay(pdMS_TO_TICKS(200));
-            continue;
-        }
-
-        touch_point_t point;
-        if (touch_driver_get_point(&point) == ESP_OK) {
-            // 判断触摸点是否落在 Timer 按钮区域内
-            bool in_btn = point.touched &&
-                          point.x >= TIMER_BTN_X_MIN && point.x <= TIMER_BTN_X_MAX &&
-                          point.y >= TIMER_BTN_Y_MIN && point.y <= TIMER_BTN_Y_MAX;
-
-            if (in_btn) {
-                // 手指按在按钮区域内
-                btn_pressed = true;
-            } else if (btn_pressed && !point.touched) {
-                // 手指已释放，且之前按在按钮区域内 -> 触发一次点击
-                btn_pressed = false;
-
-                // 仅在开机主页面下响应 Timer 按钮
-                if (s_thermostat.mode == THERMOSTAT_MODE_ON &&
-                    s_thermostat.current_page == UI_PAGE_MAIN) {
-
-                    int64_t now_ms = esp_timer_get_time() / 1000;
-
-                    if (s_thermostat.sleep_timer_active) {
-                        // 倒计时进行中 -> 关闭倒计时
-                        s_thermostat.sleep_timer_active = false;
-                        s_thermostat.sleep_timer_start_ms = 0;
-                        ESP_LOGI(TAG, "Touch Timer button -> Countdown OFF");
-                    } else {
-                        // 未倒计时 -> 使用当前记忆的 Sleep Timer 设定值启动倒计时
-                        // 需求：触发 sleeper 启动的只有屏上右下角的触摸按键。
-                        // 设定值由 Sleep Timer 设置页 (FUNC 进入) 通过编码器调整，
-                        // 改动后记忆 (NVS)，此处直接使用 dev->sleep_timer_setting。
-                        s_thermostat.sleep_timer_active = true;
-                        s_thermostat.sleep_timer_start_ms = now_ms;
-                        ESP_LOGI(TAG, "Touch Timer button -> %d min countdown started",
-                                 s_thermostat.sleep_timer_setting);
-                    }
-                }
-            } else if (!in_btn && point.touched) {
-                // 手指按在按钮区域外，保持未按下状态
-                btn_pressed = false;
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-}
 
 // 3. 按键扫描与状态轮询任务 (20ms 周期)
 // 检测模式变化和目标温度变化，变化时同步至 Matter
@@ -855,11 +781,6 @@ void app_main(void) {
     xTaskCreate(led_ui_task,       "led_ui_task",       3072, NULL, 4, NULL);
     xTaskCreate(lcd_ui_task,       "lcd_ui_task",       8192, NULL, 4, NULL);
     xTaskCreate(button_poll_task,  "button_poll_task",  3072, NULL, 6, NULL);
-    // 触摸轮询任务：检测触摸屏按下，映射到 Timer 按钮并切换 30 分钟倒计时。
-    // 触摸屏与 LCD 共用 SPI2_HOST 总线，触摸驱动已改为手动控制片选 (spics_io_num=-1)，
-    // 避免 spi_bus_add_device() 重新配置共享总线导致 LCD 显示异常。
-    // 【2026-08-16 重新启用】配合 GPIO13 外部上拉修复，重新启用触摸轮询任务。
-    xTaskCreate(touch_poll_task,   "touch_poll_task",   3072, NULL, 4, NULL);
 
     // 9.1 首次上电触摸校准
     //     若 NVS 中无"已校准"标记，则启动交互式校准任务。

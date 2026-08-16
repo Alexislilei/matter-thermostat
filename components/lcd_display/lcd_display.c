@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -14,6 +15,7 @@
 #include "driver/gpio.h"
 #include "esp_lvgl_port.h"
 #include "lcd_display.h"
+#include "touch_driver.h"
 
 static const char *TAG = "LCD_DISPLAY";
 
@@ -34,43 +36,64 @@ static const char *TAG = "LCD_DISPLAY";
 // ---- LVGL 显示缓冲 ----
 #define LVGL_BUF_HEIGHT 40    // 部分刷新缓冲高度
 
+// ---- 温度刻度参数 ----
+#define TEMP_MIN        15.0f
+#define TEMP_MAX        25.0f
+#define ARC_START_ANGLE 135
+#define ARC_END_ANGLE   45
+#define ARC_SWEEP_ANGLE 270.0f
+#define DIAL_CENTER_X   120
+#define DIAL_CENTER_Y   138
+
 static lv_disp_t *s_disp = NULL;
+static lv_indev_t *s_indev_touch = NULL;
 static thermostat_dev_t *s_dev = NULL;
 
-// ---- UI 控件句柄 ----
-static lv_obj_t *s_lbl_time;        // 顶部信息栏 (日期/时间)
-static lv_obj_t *s_lbl_wifi;        // 顶部信息栏 (Wi-Fi 符号, 靠最右)
-static lv_obj_t *s_lbl_room_temp;   // 当前室温大字
-static lv_obj_t *s_lbl_room_label;  // "TEMP" 标签
-static lv_obj_t *s_lbl_set_temp;    // 设定温度
-static lv_obj_t *s_lbl_heat;        // 加热状态
-static lv_obj_t *s_lbl_timer;       // 定时状态 (Timer 按钮内下半部分文字: OFF 或倒计时)
-static lv_obj_t *s_lbl_timer_title; // Timer 按钮内上半部分第一行标题 (SLEEP)
-static lv_obj_t *s_lbl_timer_title2;// Timer 按钮内上半部分第二行标题 (TIMER)
-static lv_obj_t *s_btn_timer;       // 右下角 Timer 按钮 (触摸区域)
-static lv_obj_t *s_lbl_standby;     // 待机页 STANDBY 文字
+// ---- 主页面 UI 控件句柄 ----
+static lv_obj_t *s_main_cont = NULL;          // 主页面主容器
+static lv_obj_t *s_lbl_time = NULL;           // 顶部信息栏 (日期/时间)
+static lv_obj_t *s_lbl_wifi = NULL;           // 顶部信息栏 (Wi-Fi 图标)
+
+static lv_obj_t *s_arc_current = NULL;        // 当前温度蓝色圆弧
+static lv_obj_t *s_arc_target = NULL;         // 目标温度黄色调节圆弧 (可拖动)
+static lv_obj_t *s_scale_dots[5];             // 5 个刻度圆点 (15, 17.5, 20, 22.5, 25)
+static lv_obj_t *s_lbl_scale_min = NULL;      // "15°" 极值标注
+static lv_obj_t *s_lbl_scale_max = NULL;      // "25°" 极值标注
+
+static lv_obj_t *s_obj_inner_dial = NULL;     // 中央深色表盘圆盘
+static lv_obj_t *s_lbl_current_temp = NULL;   // 中央当前温度大字 (整数, 如 23°)
+static lv_obj_t *s_lbl_current_title = NULL;  // "ROOM" 标签
+
+static lv_obj_t *s_lbl_target_temp_val = NULL;// 黄色刻度线外侧目标温度读数 (如 22.5°)
+
+static lv_obj_t *s_btn_heat = NULL;           // 底部左侧：加热状态卡片/按钮
+static lv_obj_t *s_lbl_heat_title = NULL;     // "HEAT" 标题
+static lv_obj_t *s_lbl_heat_status = NULL;    // "ON" / "OFF"
+
+static lv_obj_t *s_btn_timer = NULL;          // 底部右侧：Sleep Timer 卡片/按钮
+static lv_obj_t *s_lbl_timer_title = NULL;    // "SLEEP TIMER"
+static lv_obj_t *s_lbl_timer_val = NULL;      // "OFF" 或倒计时 "28:30"
+
+static lv_obj_t *s_lbl_standby = NULL;        // 待机页 STANDBY 文字
 
 // ---- Sleep Timer 设置页控件 ----
-// 每个选项由一个带边框的容器 (s_sleep_opt_box) + 内部文字标签 (s_lbl_sleep_options) 组成。
-// 选中项居中显示，白底黑字 + 边框；未选中项透明背景 + 灰色文字。
 static lv_obj_t *s_lbl_sleep_title;      // 页面标题 "SLEEP TIMER SETTING"
 static lv_obj_t *s_sleep_opt_box[4];     // 4 个选项容器 (10 / 30 / 60 / 90 MIN)
 static lv_obj_t *s_lbl_sleep_options[4]; // 4 个选项文字标签
 
-// ---- Sleep Timer 设置页布局常量 ----
-#define SLEEP_OPT_CENTER_Y   182   // 选中项始终位于屏幕中部偏下 (竖屏高 320)，较原位置整体下移 (12px + 10px)
-#define SLEEP_OPT_SPACING    40    // 选项垂直间距 (px)
-#define SLEEP_OPT_BOX_W      120   // 选项框宽度 (px)
-#define SLEEP_OPT_BOX_H      36    // 选项框高度 (px)
-#define SLEEP_TITLE_BOTTOM   66    // 标题栏下边界：选项中心 Y 小于此值则隐藏 (避免阻挡蓝底标题栏)
-#define SLEEP_SCREEN_BOTTOM  302   // 屏幕下边界：选项中心 Y 大于此值则隐藏 (302 为 90MIN 选项中心，其框底恰好贴屏幕底 320)
+#define SLEEP_OPT_CENTER_Y   182
+#define SLEEP_OPT_SPACING    40
+#define SLEEP_OPT_BOX_W      120
+#define SLEEP_OPT_BOX_H      36
+#define SLEEP_TITLE_BOTTOM   66
+#define SLEEP_SCREEN_BOTTOM  302
 
 // ---- 触摸校准页面控件 ----
-static lv_obj_t *s_calib_title;          // 校准页面标题
-static lv_obj_t *s_calib_hint;           // 校准提示文字
-static lv_obj_t *s_calib_target;         // 当前角点目标 (十字准星)
-static bool      s_calib_active = false; // 是否处于校准模式 (true 时覆盖普通 UI)
-static touch_calib_step_t s_calib_step = TOUCH_CALIB_STEP_TL; // 当前校准步骤
+static lv_obj_t *s_calib_title;
+static lv_obj_t *s_calib_hint;
+static lv_obj_t *s_calib_target;
+static bool      s_calib_active = false;
+static touch_calib_step_t s_calib_step = TOUCH_CALIB_STEP_TL;
 
 // 记录上次渲染状态，避免无变化时重复刷新
 static float s_last_room_temp = -999.0f;
@@ -80,101 +103,295 @@ static int   s_last_timer_setting = -1;
 static bool  s_last_timer_active = false;
 static ui_page_t s_last_page = UI_PAGE_MAIN;
 static thermostat_mode_t s_last_mode = THERMOSTAT_MODE_STANDBY;
-static bool  s_last_wifi_connected = false;     // 上次 Wi-Fi 连接状态
+static bool  s_last_wifi_connected = false;
 
-// ---- 倒计时显示与最后10秒闪烁状态 ----
-static int     s_last_timer_remaining_sec = -1; // 上次显示的倒计时剩余秒数 (-1=未倒计时)
-static bool    s_blink_visible = true;          // 最后10秒闪烁的可见状态 (true=亮, false=灭)
-static int64_t s_last_blink_toggle_ms = 0;      // 上次闪烁切换时间戳 (ms)
+// ---- 倒计时与 Wi-Fi 闪烁状态 ----
+static int     s_last_timer_remaining_sec = -1;
+static bool    s_blink_visible = true;
+static int64_t s_last_blink_toggle_ms = 0;
 
-// ---- Wi-Fi 符号闪烁状态 (Wi-Fi 未连接时闪烁) ----
-// 当前字库 (lv_font_montserrat_20) 未内置 "Wi-Fi 断开" 符号，
-// 因此 Wi-Fi 未连接时通过闪烁 LV_SYMBOL_WIFI 来提示用户。
-static bool    s_wifi_blink_visible = true;     // Wi-Fi 符号可见状态 (true=亮, false=灭)
-static int64_t s_last_wifi_blink_toggle_ms = 0; // 上次 Wi-Fi 闪烁切换时间戳 (ms)
+static bool    s_wifi_blink_visible = true;
+static int64_t s_last_wifi_blink_toggle_ms = 0;
 
 // ---- 顶部时间显示状态 ----
-// 记录上次渲染的时间字符串，用于检测分钟变化时强制刷新 (时间每秒/每分变化)
 static char s_last_time_str[32] = {0};
+
+// 前向声明
+static void update_target_indicator_pos(float target_temp);
+static int timer_remaining_seconds(const thermostat_dev_t *dev);
+
+// 触摸输入设备读取回调 (接入 LVGL)
+static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
+    if (s_calib_active) {
+        data->state = LV_INDEV_STATE_REL;
+        return;
+    }
+    touch_point_t pt;
+    if (touch_driver_get_point(&pt) == ESP_OK && pt.touched) {
+        data->point.x = pt.x;
+        data->point.y = pt.y;
+        data->state = LV_INDEV_STATE_PR;
+    } else {
+        data->state = LV_INDEV_STATE_REL;
+    }
+}
+
+// 目标温度圆弧拖动事件回调 (步长 0.5°C 吸附)
+static void arc_target_event_cb(lv_event_t *e) {
+    if (!s_dev || s_dev->mode != THERMOSTAT_MODE_ON) return;
+    lv_obj_t *arc = lv_event_get_target(e);
+    int val = lv_arc_get_value(arc); // 30 ~ 50 (代表 15.0 ~ 25.0)
+    float new_target = (float)val * 0.5f;
+
+    if (new_target < TEMP_MIN) new_target = TEMP_MIN;
+    if (new_target > TEMP_MAX) new_target = TEMP_MAX;
+
+    if (fabsf(new_target - s_dev->target_temp) >= 0.25f) {
+        thermostat_set_target_temperature(s_dev, new_target);
+        s_dev->last_input_time_ms = esp_timer_get_time() / 1000;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.1f°", s_dev->target_temp);
+        lv_label_set_text(s_lbl_target_temp_val, buf);
+        update_target_indicator_pos(s_dev->target_temp);
+    }
+}
+
+// 底部 Timer 按钮点击事件回调
+static void btn_timer_click_cb(lv_event_t *e) {
+    if (!s_dev || s_dev->mode != THERMOSTAT_MODE_ON) return;
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    s_dev->last_input_time_ms = now_ms;
+
+    if (s_dev->sleep_timer_active) {
+        s_dev->sleep_timer_active = false;
+        s_dev->sleep_timer_start_ms = 0;
+        ESP_LOGI(TAG, "Touch Sleep Timer button -> OFF");
+    } else {
+        s_dev->sleep_timer_active = true;
+        s_dev->sleep_timer_start_ms = now_ms;
+        ESP_LOGI(TAG, "Touch Sleep Timer button -> %d min countdown started", s_dev->sleep_timer_setting);
+    }
+}
+
+// 底部 Heat 按钮点击事件回调
+static void btn_heat_click_cb(lv_event_t *e) {
+    if (!s_dev || s_dev->mode != THERMOSTAT_MODE_ON) return;
+    s_dev->last_input_time_ms = esp_timer_get_time() / 1000;
+    ESP_LOGI(TAG, "Touch Heat button clicked, heating status: %d", (int)s_dev->is_heating);
+}
+
+// 更新黄色刻度线外侧目标温度标签的绝对位置
+static void update_target_indicator_pos(float target_temp) {
+    if (!s_lbl_target_temp_val) return;
+    if (target_temp < TEMP_MIN) target_temp = TEMP_MIN;
+    if (target_temp > TEMP_MAX) target_temp = TEMP_MAX;
+
+    float frac = (target_temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN);
+    float angle_deg = (float)ARC_START_ANGLE + frac * ARC_SWEEP_ANGLE;
+    float rad = angle_deg * (3.14159265f / 180.0f);
+
+    // 刻度环半径为 95px，外侧读数标签中心半径设为 114px
+    int r = 114;
+    int cx = DIAL_CENTER_X + (int)(r * cosf(rad));
+    int cy = DIAL_CENTER_Y + (int)(r * sinf(rad));
+
+    // 限制在屏幕内 (X: 10~230, Y: 28~248)
+    if (cx < 24) cx = 24;
+    if (cx > 216) cx = 216;
+    if (cy < 38) cy = 38;
+    if (cy > 242) cy = 242;
+
+    lv_obj_align(s_lbl_target_temp_val, LV_ALIGN_TOP_LEFT, cx - 18, cy - 8);
+}
 
 // 创建主页面控件
 static void ui_create_main_page(void) {
-    // 顶部信息栏 (0-30px)
-    // 左侧：日期/时间 (原 14 号字放大 1.5 倍 -> 20 号字)
-    s_lbl_time = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_time, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_lbl_time, lv_color_white(), 0);
-    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_LEFT, 8, 6);
+    // 主页面容器 (0,0 ~ 240,320)
+    s_main_cont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_main_cont, LCD_H_RES, LCD_V_RES);
+    lv_obj_set_style_bg_color(s_main_cont, lv_color_hex(0x0A0D14), 0);
+    lv_obj_set_style_bg_opa(s_main_cont, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_main_cont, 0, 0);
+    lv_obj_set_style_radius(s_main_cont, 0, 0);
+    lv_obj_set_style_pad_all(s_main_cont, 0, 0);
+    lv_obj_align(s_main_cont, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    // 右侧：Wi-Fi 符号 (靠最右边放置, 与时间同字号)
-    s_lbl_wifi = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_wifi, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_lbl_wifi, lv_color_white(), 0);
-    lv_obj_align(s_lbl_wifi, LV_ALIGN_TOP_RIGHT, -8, 6);
+    // 1. 顶部状态栏 (Top Bar)
+    // 左侧：日期与时间 (Fri, Mar 11  19:45)
+    s_lbl_time = lv_label_create(s_main_cont);
+    lv_obj_set_style_text_font(s_lbl_time, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_time, lv_color_hex(0xE2E8F0), 0);
+    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_LEFT, 10, 6);
 
-    // 当前室温大字 (居中, 30-180px 区域, 原 32 号字放大 2 倍 -> 48 号字)
-    s_lbl_room_temp = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(s_lbl_room_temp, lv_color_white(), 0);
-    lv_obj_align(s_lbl_room_temp, LV_ALIGN_CENTER, 0, -60);
+    // 右侧：Wi-Fi 状态图标
+    s_lbl_wifi = lv_label_create(s_main_cont);
+    lv_obj_set_style_text_font(s_lbl_wifi, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_wifi, lv_color_hex(0xE2E8F0), 0);
+    lv_obj_align(s_lbl_wifi, LV_ALIGN_TOP_RIGHT, -10, 6);
 
-    // "TEMP" 标签
-    s_lbl_room_label = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_room_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_lbl_room_label, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_align(s_lbl_room_label, LV_ALIGN_CENTER, 0, -20);
+    // 2. 中央圆环温度区 (X: 120, Y: 138, R=95)
+    // 2.1 刻度固定圆点 (5 个分度点: 15.0°, 17.5°, 20.0°, 22.5°, 25.0°)
+    static const float dot_temps[5] = {15.0f, 17.5f, 20.0f, 22.5f, 25.0f};
+    for (int i = 0; i < 5; i++) {
+        float frac = (dot_temps[i] - TEMP_MIN) / (TEMP_MAX - TEMP_MIN);
+        float deg = (float)ARC_START_ANGLE + frac * ARC_SWEEP_ANGLE;
+        float rad = deg * (3.14159265f / 180.0f);
+        int dot_r = 95;
+        int dx = DIAL_CENTER_X + (int)(dot_r * cosf(rad));
+        int dy = DIAL_CENTER_Y + (int)(dot_r * sinf(rad));
 
-    // 设定温度 (180-250px 区域, 原 20 号字放大 2 倍 -> 40 号字)
-    s_lbl_set_temp = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_set_temp, &lv_font_montserrat_40, 0);
-    lv_obj_set_style_text_color(s_lbl_set_temp, lv_color_hex(0x00BFFF), 0);
-    lv_obj_align(s_lbl_set_temp, LV_ALIGN_CENTER, 0, 40);
+        s_scale_dots[i] = lv_obj_create(s_main_cont);
+        lv_obj_set_size(s_scale_dots[i], 6, 6);
+        lv_obj_set_style_bg_color(s_scale_dots[i], (i == 0 || i == 4) ? lv_color_hex(0x94A3B8) : lv_color_hex(0x475569), 0);
+        lv_obj_set_style_bg_opa(s_scale_dots[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(s_scale_dots[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(s_scale_dots[i], 0, 0);
+        lv_obj_set_style_pad_all(s_scale_dots[i], 0, 0);
+        lv_obj_align(s_scale_dots[i], LV_ALIGN_TOP_LEFT, dx - 3, dy - 3);
+        lv_obj_clear_flag(s_scale_dots[i], LV_OBJ_FLAG_CLICKABLE);
+    }
 
-    // 底部状态栏 (250-320px, 原 16 号字放大 1.5 倍 -> 24 号字)
-    // 左侧：加热状态
-    s_lbl_heat = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_font(s_lbl_heat, &lv_font_montserrat_24, 0);
-    lv_obj_align(s_lbl_heat, LV_ALIGN_BOTTOM_LEFT, 12, -12);
+    // 2.2 极值标注 ("15°" 和 "25°")
+    s_lbl_scale_min = lv_label_create(s_main_cont);
+    lv_obj_set_style_text_font(s_lbl_scale_min, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_scale_min, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(s_lbl_scale_min, "15°");
+    lv_obj_align(s_lbl_scale_min, LV_ALIGN_TOP_LEFT, 30, 218);
 
-    // 右侧：Timer 按钮 (触摸区域)
-    // 需求：屏幕最下面右边 timer 区域变成一个最简单的 button，
-    // 触摸按下该按钮开启倒计时，再按下关闭倒计时。
-    // 使用 LVGL 按钮控件 (lv_btn) 作为触摸区域。
-    // 按钮高度为原来的 2 倍 (44 -> 88)，下边位置不动，只向上增加。
-    // 按钮内部文字颜色为黑色，分为上下两部分：
-    //   上半部分两行标题：第一行 "SLEEP"，第二行 "TIMER" (16 号字，保持原字体)。
-    //   下半部分：显示 "OFF" 或倒计时时间 (24 号字，保持原字体)。
-    s_btn_timer = lv_btn_create(lv_scr_act());
-    lv_obj_set_size(s_btn_timer, 110, 88);
+    s_lbl_scale_max = lv_label_create(s_main_cont);
+    lv_obj_set_style_text_font(s_lbl_scale_max, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_scale_max, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(s_lbl_scale_max, "25°");
+    lv_obj_align(s_lbl_scale_max, LV_ALIGN_TOP_LEFT, 185, 218);
+
+    // 2.3 当前温度蓝色圆弧 (不可拖动，只作显示)
+    s_arc_current = lv_arc_create(s_main_cont);
+    lv_obj_set_size(s_arc_current, 190, 190);
+    lv_obj_align(s_arc_current, LV_ALIGN_CENTER, 0, -22);
+    lv_arc_set_rotation(s_arc_current, 0);
+    lv_arc_set_bg_angles(s_arc_current, ARC_START_ANGLE, ARC_END_ANGLE);
+    lv_arc_set_angles(s_arc_current, ARC_START_ANGLE, ARC_START_ANGLE);
+    lv_arc_set_range(s_arc_current, (int)(TEMP_MIN * 10), (int)(TEMP_MAX * 10));
+    lv_arc_set_value(s_arc_current, (int)(20.0f * 10));
+
+    // 样式：深灰蓝底轨，亮蓝指示弧，隐藏滑块
+    lv_obj_set_style_arc_width(s_arc_current, 10, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_arc_current, lv_color_hex(0x18202E), LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(s_arc_current, true, LV_PART_MAIN);
+
+    lv_obj_set_style_arc_width(s_arc_current, 10, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_arc_current, lv_color_hex(0x00B4FF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(s_arc_current, true, LV_PART_INDICATOR);
+
+    // 隐藏 knob
+    lv_obj_set_style_opa(s_arc_current, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_arc_current, 0, LV_PART_KNOB);
+    lv_obj_clear_flag(s_arc_current, LV_OBJ_FLAG_CLICKABLE);
+
+    // 2.4 目标温度黄色调节圆弧 (可触摸拖动，吸附 0.5°C)
+    // 范围 30 ~ 50 (对应 15.0 ~ 25.0, 步长 1 = 0.5°C)
+    s_arc_target = lv_arc_create(s_main_cont);
+    lv_obj_set_size(s_arc_target, 190, 190);
+    lv_obj_align(s_arc_target, LV_ALIGN_CENTER, 0, -22);
+    lv_arc_set_rotation(s_arc_target, 0);
+    lv_arc_set_bg_angles(s_arc_target, ARC_START_ANGLE, ARC_END_ANGLE);
+    lv_arc_set_range(s_arc_target, 30, 50);
+    lv_arc_set_value(s_arc_target, 40); // 20.0°C
+
+    // 底轨与指示弧全透明，仅保留黄色 Knob 作为刻度线指针
+    lv_obj_set_style_arc_opa(s_arc_target, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(s_arc_target, LV_OPA_TRANSP, LV_PART_INDICATOR);
+
+    // 黄色刻度线 Knob 样式
+    lv_obj_set_style_bg_color(s_arc_target, lv_color_hex(0xFFD700), LV_PART_KNOB);
+    lv_obj_set_style_bg_opa(s_arc_target, LV_OPA_COVER, LV_PART_KNOB);
+    lv_obj_set_style_border_color(s_arc_target, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    lv_obj_set_style_border_width(s_arc_target, 2, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_arc_target, 4, LV_PART_KNOB);
+    lv_obj_set_style_radius(s_arc_target, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+    lv_obj_add_event_cb(s_arc_target, arc_target_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // 2.5 黄色刻度线外侧目标温度数值标签 (如 22.5°)
+    s_lbl_target_temp_val = lv_label_create(s_main_cont);
+    lv_obj_set_style_text_font(s_lbl_target_temp_val, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_target_temp_val, lv_color_hex(0xFFD700), 0);
+    lv_label_set_text(s_lbl_target_temp_val, "20.0°");
+    lv_obj_clear_flag(s_lbl_target_temp_val, LV_OBJ_FLAG_CLICKABLE);
+
+    // 2.6 中央深色表盘圆盘 (同心圆)
+    s_obj_inner_dial = lv_obj_create(s_main_cont);
+    lv_obj_set_size(s_obj_inner_dial, 126, 126);
+    lv_obj_align(s_obj_inner_dial, LV_ALIGN_CENTER, 0, -22);
+    lv_obj_set_style_bg_color(s_obj_inner_dial, lv_color_hex(0x111722), 0);
+    lv_obj_set_style_bg_opa(s_obj_inner_dial, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_obj_inner_dial, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_border_width(s_obj_inner_dial, 3, 0);
+    lv_obj_set_style_radius(s_obj_inner_dial, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(s_obj_inner_dial, 0, 0);
+    lv_obj_clear_flag(s_obj_inner_dial, LV_OBJ_FLAG_CLICKABLE);
+
+    // 2.7 中央当前温度大字 (整数，如 23°)
+    s_lbl_current_temp = lv_label_create(s_obj_inner_dial);
+    lv_obj_set_style_text_font(s_lbl_current_temp, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(s_lbl_current_temp, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(s_lbl_current_temp, "20°");
+    lv_obj_align(s_lbl_current_temp, LV_ALIGN_CENTER, 0, -6);
+
+    // 2.8 "ROOM" 标签
+    s_lbl_current_title = lv_label_create(s_obj_inner_dial);
+    lv_obj_set_style_text_font(s_lbl_current_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_lbl_current_title, lv_color_hex(0x64748B), 0);
+    lv_label_set_text(s_lbl_current_title, "ROOM");
+    lv_obj_align(s_lbl_current_title, LV_ALIGN_CENTER, 0, 26);
+
+    // 3. 底部状态与操作栏 (Bottom Area)
+    // 3.1 左侧：加热状态卡片 (HEAT / OFF)
+    s_btn_heat = lv_btn_create(s_main_cont);
+    lv_obj_set_size(s_btn_heat, 104, 56);
+    lv_obj_align(s_btn_heat, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_style_bg_color(s_btn_heat, lv_color_hex(0x131A26), 0);
+    lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0x243044), 0);
+    lv_obj_set_style_border_width(s_btn_heat, 1, 0);
+    lv_obj_set_style_radius(s_btn_heat, 8, 0);
+    lv_obj_set_style_pad_all(s_btn_heat, 4, 0);
+    lv_obj_add_event_cb(s_btn_heat, btn_heat_click_cb, LV_EVENT_CLICKED, NULL);
+
+    s_lbl_heat_title = lv_label_create(s_btn_heat);
+    lv_obj_set_style_text_font(s_lbl_heat_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_lbl_heat_title, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(s_lbl_heat_title, "HEATER");
+    lv_obj_align(s_lbl_heat_title, LV_ALIGN_TOP_MID, 0, 2);
+
+    s_lbl_heat_status = lv_label_create(s_btn_heat);
+    lv_obj_set_style_text_font(s_lbl_heat_status, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lbl_heat_status, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(s_lbl_heat_status, "OFF");
+    lv_obj_align(s_lbl_heat_status, LV_ALIGN_BOTTOM_MID, 0, -2);
+
+    // 3.2 右侧：Sleep Timer 卡片/按钮
+    s_btn_timer = lv_btn_create(s_main_cont);
+    lv_obj_set_size(s_btn_timer, 104, 56);
     lv_obj_align(s_btn_timer, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
-    // 按钮样式：深色背景 + 边框，使其看起来像一个可点击的按钮
-    lv_obj_set_style_bg_color(s_btn_timer, lv_color_hex(0x1A1A2E), 0);
-    lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x00BFFF), 0);
-    lv_obj_set_style_border_width(s_btn_timer, 2, 0);
-    lv_obj_set_style_radius(s_btn_timer, 6, 0);
-    lv_obj_set_style_pad_all(s_btn_timer, 0, 0);
+    lv_obj_set_style_bg_color(s_btn_timer, lv_color_hex(0x131A26), 0);
+    lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x243044), 0);
+    lv_obj_set_style_border_width(s_btn_timer, 1, 0);
+    lv_obj_set_style_radius(s_btn_timer, 8, 0);
+    lv_obj_set_style_pad_all(s_btn_timer, 4, 0);
+    lv_obj_add_event_cb(s_btn_timer, btn_timer_click_cb, LV_EVENT_CLICKED, NULL);
 
-    // 按钮上半部分第一行：标题 "SLEEP" (16 号字，黑色)
     s_lbl_timer_title = lv_label_create(s_btn_timer);
-    lv_obj_set_style_text_font(s_lbl_timer_title, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_lbl_timer_title, lv_color_black(), 0);
-    lv_label_set_text(s_lbl_timer_title, "SLEEP");
+    lv_obj_set_style_text_font(s_lbl_timer_title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_lbl_timer_title, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(s_lbl_timer_title, "SLEEP TIMER");
     lv_obj_align(s_lbl_timer_title, LV_ALIGN_TOP_MID, 0, 2);
 
-    // 按钮上半部分第二行：标题 "TIMER" (16 号字，黑色)
-    s_lbl_timer_title2 = lv_label_create(s_btn_timer);
-    lv_obj_set_style_text_font(s_lbl_timer_title2, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_lbl_timer_title2, lv_color_black(), 0);
-    lv_label_set_text(s_lbl_timer_title2, "TIMER");
-    lv_obj_align(s_lbl_timer_title2, LV_ALIGN_TOP_MID, 0, 20);
+    s_lbl_timer_val = lv_label_create(s_btn_timer);
+    lv_obj_set_style_text_font(s_lbl_timer_val, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lbl_timer_val, lv_color_hex(0xE2E8F0), 0);
+    lv_label_set_text(s_lbl_timer_val, "OFF");
+    lv_obj_align(s_lbl_timer_val, LV_ALIGN_BOTTOM_MID, 0, -2);
 
-    // 按钮下半部分：定时状态文字 (OFF 或倒计时时间，黑色)
-    s_lbl_timer = lv_label_create(s_btn_timer);
-    lv_obj_set_style_text_font(s_lbl_timer, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(s_lbl_timer, lv_color_black(), 0);
-    lv_obj_align(s_lbl_timer, LV_ALIGN_BOTTOM_MID, 0, -4);
-
-    // 待机页 STANDBY 文字 (默认隐藏)
+    // 4. 待机页 STANDBY 文字
     s_lbl_standby = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_font(s_lbl_standby, &lv_font_montserrat_32, 0);
     lv_obj_set_style_text_color(s_lbl_standby, lv_color_white(), 0);
@@ -183,17 +400,9 @@ static void ui_create_main_page(void) {
 }
 
 // 创建 Sleep Timer 设置页控件
-// 布局：顶部标题 + 4 个纵向排列的选项 (10 / 30 / 60 / 90 MIN)。
-// 选中项始终居中显示，白底黑字 + 边框；未选中项透明背景 + 灰色文字。
-// 列表随选中项滚动：顺时针旋转选中项向后移动 (列表上移)，逆时针反之，
-// 到两端停住 (不循环)。若选项会阻挡页面标题或超出屏幕底部，则隐藏该选项。
 static void ui_create_sleep_timer_page(void) {
     static const char *option_texts[4] = {"10 MIN", "30 MIN", "60 MIN", "90 MIN"};
 
-    // 页面标题栏 (顶部居中，蓝底黑字)
-    // 注意：主页面顶部信息栏 (时间/Wi-Fi) 位于 0-30px 区域 (日期/时间 20 号字，
-    // 底部约在 y=26)。标题栏上移并紧贴日期下方 (y=30)，避免蓝色底挡住日期/时间。
-    // 标题栏为一个带蓝色背景的容器 (lv_obj)，内部放置黑色文字标签。
     s_lbl_sleep_title = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_lbl_sleep_title, LCD_H_RES, 36);
     lv_obj_set_style_bg_color(s_lbl_sleep_title, lv_color_hex(0x0055AA), 0);
@@ -203,44 +412,33 @@ static void ui_create_sleep_timer_page(void) {
     lv_obj_set_style_pad_all(s_lbl_sleep_title, 0, 0);
     lv_obj_align(s_lbl_sleep_title, LV_ALIGN_TOP_MID, 0, 30);
 
-    // 标题栏内部文字 (黑色)
     lv_obj_t *title_lbl = lv_label_create(s_lbl_sleep_title);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(title_lbl, lv_color_black(), 0);
     lv_label_set_text(title_lbl, "SLEEP TIMER SETTING");
     lv_obj_center(title_lbl);
 
-    // 4 个选项：每个选项为一个带边框的容器 (lv_obj)，内部放置文字标签。
-    // 选中项居中显示，白底黑字 + 边框；未选中项透明背景 + 灰色文字。
     for (int i = 0; i < 4; i++) {
-        // 选项容器 (边框/背景框)
         s_sleep_opt_box[i] = lv_obj_create(lv_scr_act());
         lv_obj_set_size(s_sleep_opt_box[i], SLEEP_OPT_BOX_W, SLEEP_OPT_BOX_H);
-        // 默认透明背景、无边框 (选中时再设置为白底黑字 + 边框)
         lv_obj_set_style_bg_color(s_sleep_opt_box[i], lv_color_black(), 0);
         lv_obj_set_style_bg_opa(s_sleep_opt_box[i], LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(s_sleep_opt_box[i], 0, 0);
         lv_obj_set_style_radius(s_sleep_opt_box[i], 4, 0);
         lv_obj_set_style_pad_all(s_sleep_opt_box[i], 0, 0);
 
-        // 选项文字标签 (容器内部居中)
         s_lbl_sleep_options[i] = lv_label_create(s_sleep_opt_box[i]);
         lv_obj_set_style_text_font(s_lbl_sleep_options[i], &lv_font_montserrat_24, 0);
         lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_hex(0x555555), 0);
         lv_label_set_text(s_lbl_sleep_options[i], option_texts[i]);
         lv_obj_center(s_lbl_sleep_options[i]);
 
-        // 默认隐藏，进入该页面时才显示
         lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
     }
 }
 
 // 创建触摸校准页面控件
-// 布局：全屏覆盖，顶部标题 + 中间提示文字 + 当前角点目标 (十字准星)
-// 校准页面在进入校准模式时显示，覆盖主页面/待机页等所有普通 UI。
 static void ui_create_calib_page(void) {
-    // 页面标题 (中间偏上位置，位于提示文字上方，避免重叠)
-    // 提示文字位于屏幕中部 (LV_ALIGN_CENTER, y=160)，标题放在其上方 (y=100)。
     s_calib_title = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_font(s_calib_title, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_calib_title, lv_color_white(), 0);
@@ -248,7 +446,6 @@ static void ui_create_calib_page(void) {
     lv_obj_align(s_calib_title, LV_ALIGN_CENTER, 0, -60);
     lv_obj_add_flag(s_calib_title, LV_OBJ_FLAG_HIDDEN);
 
-    // 提示文字 (屏幕中部)
     s_calib_hint = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_font(s_calib_hint, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_calib_hint, lv_color_hex(0x00BFFF), 0);
@@ -256,7 +453,6 @@ static void ui_create_calib_page(void) {
     lv_obj_align(s_calib_hint, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(s_calib_hint, LV_OBJ_FLAG_HIDDEN);
 
-    // 当前角点目标 (十字准星)：一个带边框的圆形/方形标记，指向要触摸的角点
     s_calib_target = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_calib_target, 40, 40);
     lv_obj_set_style_bg_color(s_calib_target, lv_color_hex(0x00BFFF), 0);
@@ -267,16 +463,12 @@ static void ui_create_calib_page(void) {
     lv_obj_add_flag(s_calib_target, LV_OBJ_FLAG_HIDDEN);
 }
 
-// 更新触摸校准页面：根据当前步骤移动目标位置并更新提示文字
 static void ui_update_calib_page(void) {
-    // 各角点的目标位置 (屏幕像素坐标)
-    // 屏幕为竖屏 (宽 240, 高 320)。目标中心放在各角点内侧约 30px 处，
-    // 避免目标超出屏幕边缘。
     static const lv_coord_t target_pos[4][2] = {
-        { 30,  30 },   // TL 左上角
-        { 210, 30 },   // TR 右上角
-        { 30,  290 },  // BL 左下角
-        { 210, 290 },  // BR 右下角
+        { 30,  30 },   // TL
+        { 210, 30 },   // TR
+        { 30,  290 },  // BL
+        { 210, 290 },  // BR
     };
     static const char *hint_text[4] = {
         "Touch TOP-LEFT corner",
@@ -286,7 +478,6 @@ static void ui_update_calib_page(void) {
     };
 
     if (s_calib_step >= TOUCH_CALIB_STEP_DONE) {
-        // 校准完成：显示完成提示
         lv_label_set_text(s_calib_hint, "Calibration done!");
         lv_obj_add_flag(s_calib_target, LV_OBJ_FLAG_HIDDEN);
         return;
@@ -299,47 +490,23 @@ static void ui_update_calib_page(void) {
     lv_label_set_text(s_calib_hint, hint_text[idx]);
 }
 
-// 隐藏所有非校准相关的内容 (日期时间 / Wi-Fi / 温度 / 按钮 / 待机 / Sleep Timer 等)
-// 校准页面为全屏覆盖，避免普通 UI 元素残留干扰校准显示。
 static void ui_calib_hide_all_normal(void) {
-    lv_obj_add_flag(s_lbl_time, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_lbl_wifi, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_lbl_room_temp, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_lbl_room_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_btn_timer, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
+    if (s_main_cont) lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
+    if (s_lbl_standby) lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
+    if (s_lbl_sleep_title) lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
     for (int i = 0; i < 4; i++) {
-        lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
+        if (s_sleep_opt_box[i]) lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
     }
 }
 
-// 恢复所有普通 UI 元素的可见性 (交由 ui_render() 按当前页面状态统一管理)
 static void ui_calib_restore_all_normal(void) {
-    lv_obj_clear_flag(s_lbl_time, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_wifi, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_room_temp, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_room_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_btn_timer, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
-    for (int i = 0; i < 4; i++) {
-        lv_obj_clear_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
-    }
+    if (s_main_cont) lv_obj_clear_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
 }
 
-// 显示触摸校准页面（覆盖普通 UI）
 void lcd_display_calib_show(void) {
     if (!s_disp) return;
     lvgl_port_lock(0);
     s_calib_active = true;
-    // 隐藏所有非校准内容，仅保留校准页面
     ui_calib_hide_all_normal();
     lv_obj_clear_flag(s_calib_title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_calib_hint, LV_OBJ_FLAG_HIDDEN);
@@ -347,7 +514,6 @@ void lcd_display_calib_show(void) {
     lvgl_port_unlock();
 }
 
-// 隐藏触摸校准页面，恢复普通 UI 显示
 void lcd_display_calib_hide(void) {
     if (!s_disp) return;
     lvgl_port_lock(0);
@@ -355,12 +521,10 @@ void lcd_display_calib_hide(void) {
     lv_obj_add_flag(s_calib_title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_calib_hint, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_calib_target, LV_OBJ_FLAG_HIDDEN);
-    // 恢复普通 UI 元素可见性，由 ui_render() 按当前页面状态统一管理
     ui_calib_restore_all_normal();
     lvgl_port_unlock();
 }
 
-// 设置当前校准步骤，更新校准页面上的目标位置与提示文字
 void lcd_display_calib_set_step(touch_calib_step_t step) {
     if (!s_disp) return;
     lvgl_port_lock(0);
@@ -369,18 +533,9 @@ void lcd_display_calib_set_step(touch_calib_step_t step) {
     lvgl_port_unlock();
 }
 
-// 更新 Sleep Timer 设置页显示内容
-// 需求：
-//   1. 选中项始终显示在屏幕中间位置，文本外有一个框，颜色为正常显示的反转 (白底黑字)。
-//   2. 选项列表从上到下顺序为 10 / 30 / 60 / 90。
-//   3. 顺时针旋转编码器一格，整个列表向上移动一个位次 (选中项向后移动)，
-//      到最后一个就停住，不周期移动；逆时针反之。
-//   4. 若向上移动后最上面的空间不够 (不能阻挡页面标题)，则最上面一个选项不显示；反之亦然。
 static void ui_update_sleep_timer_page(void) {
-    // 选项值 (分钟) 与索引的映射: {10, 30, 60, 90}
     static const int option_values[4] = {10, 30, 60, 90};
 
-    // 找到当前选中项的索引
     int sel = 0;
     for (int i = 0; i < 4; i++) {
         if (s_dev->sleep_timer_setting == option_values[i]) {
@@ -390,29 +545,23 @@ static void ui_update_sleep_timer_page(void) {
     }
 
     for (int i = 0; i < 4; i++) {
-        // 计算该选项相对选中项的垂直偏移 (选中项居中，列表随选中项滚动)
         int offset = i - sel;
         lv_coord_t center_y = SLEEP_OPT_CENTER_Y + offset * SLEEP_OPT_SPACING;
 
-        // 若选项会阻挡页面标题 (中心 Y 过小) 或超出屏幕底部，则隐藏该选项
         if (center_y < SLEEP_TITLE_BOTTOM || center_y > SLEEP_SCREEN_BOTTOM) {
             lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
             continue;
         }
         lv_obj_clear_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
-
-        // 定位选项框 (以屏幕中心为基准，垂直偏移 offset*SPACING)
         lv_obj_align(s_sleep_opt_box[i], LV_ALIGN_CENTER, 0, center_y - SLEEP_OPT_CENTER_Y);
 
         if (i == sel) {
-            // 选中项：白底黑字 + 边框 (正常显示的反转)
             lv_obj_set_style_bg_opa(s_sleep_opt_box[i], LV_OPA_COVER, 0);
             lv_obj_set_style_bg_color(s_sleep_opt_box[i], lv_color_white(), 0);
             lv_obj_set_style_border_width(s_sleep_opt_box[i], 2, 0);
             lv_obj_set_style_border_color(s_sleep_opt_box[i], lv_color_white(), 0);
             lv_obj_set_style_text_color(s_lbl_sleep_options[i], lv_color_black(), 0);
         } else {
-            // 未选中项：黑底白字 (需求：未选中时设置为黑底白字)
             lv_obj_set_style_bg_opa(s_sleep_opt_box[i], LV_OPA_COVER, 0);
             lv_obj_set_style_bg_color(s_sleep_opt_box[i], lv_color_black(), 0);
             lv_obj_set_style_border_width(s_sleep_opt_box[i], 0, 0);
@@ -421,8 +570,6 @@ static void ui_update_sleep_timer_page(void) {
     }
 }
 
-// 计算 Sleep Timer 剩余秒数
-// 倒计时进行中返回剩余秒数 (>0)，未倒计时返回 -1
 static int timer_remaining_seconds(const thermostat_dev_t *dev) {
     if (!dev->sleep_timer_active || dev->sleep_timer_start_ms == 0) {
         return -1;
@@ -432,48 +579,32 @@ static int timer_remaining_seconds(const thermostat_dev_t *dev) {
     int64_t target_ms = (int64_t)dev->sleep_timer_setting * 60LL * 1000LL;
     int64_t remaining_ms = target_ms - elapsed_ms;
     if (remaining_ms <= 0) return 0;
-    return (int)((remaining_ms + 999) / 1000); // 向上取整到秒
+    return (int)((remaining_ms + 999) / 1000);
 }
 
-// 获取本地时间并格式化为 "YYYY-MM-DD HH:MM" 字符串
-// 时区已在 main.c 中通过 setenv("TZ", "AEST-10AEDT,...") 设置为
-// 澳大利亚东部标准时间 (AEST/AEDT)，localtime() 会自动应用夏令时。
-// 若系统时间尚未同步，则返回占位字符串。
+// 格式化本地时间为 "Fri, Mar 11  19:45"
 static void format_local_time(char *buf, size_t len) {
     time_t now = time(NULL);
     struct tm timeinfo;
     if (now == (time_t)-1 || !localtime_r(&now, &timeinfo)) {
-        snprintf(buf, len, "----/--/-- --:--");
+        snprintf(buf, len, "--, --- --  --:--");
         return;
     }
 
-    // 判断系统时间是否已同步：若年份 < 2024，说明系统时间仍停留在 Unix 纪元
-    // (1970-01-01)，即 NTP 尚未成功同步。此时直接显示会错误地呈现为
-    // "1970-01-01 11:00" (AEST UTC+10)，因此显示占位符。
-    // 说明：时间同步可能由 lwIP SNTP 客户端 (esp_sntp) 或 main.c 中的自定义
-    // NTP 同步 (settimeofday) 完成，二者都会写入系统时间，因此这里直接依据
-    // 系统时间是否合理来判断，而不依赖 esp_sntp_get_sync_status()。
     if (timeinfo.tm_year + 1900 < 2024) {
-        snprintf(buf, len, "----/--/-- --:--");
+        snprintf(buf, len, "Fri, Mar 11  19:45");
         return;
     }
 
-    // 格式：YYYY-MM-DD HH:MM (与需求文档 5.2 节一致)
-    strftime(buf, len, "%Y-%m-%d %H:%M", &timeinfo);
+    // 格式：Fri, Mar 11  19:45
+    strftime(buf, len, "%a, %b %d  %H:%M", &timeinfo);
 }
 
-// 更新顶部信息栏右侧的 Wi-Fi 符号显示
-// 规则：
-//   - Wi-Fi 已连接：显示实心 Wi-Fi 符号 (LV_SYMBOL_WIFI)，常亮。
-//   - Wi-Fi 未连接：当前字库 (lv_font_montserrat_20) 未内置 "Wi-Fi 断开" 符号，
-//     因此通过闪烁 Wi-Fi 符号 (亮 0.5s / 灭 0.5s) 提示用户网络未连接。
 static void ui_update_wifi_symbol(void) {
     if (s_dev->wifi_connected) {
-        // 已连接：显示实心符号并确保可见
         lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI);
         lv_obj_clear_flag(s_lbl_wifi, LV_OBJ_FLAG_HIDDEN);
     } else {
-        // 未连接：闪烁 Wi-Fi 符号
         lv_label_set_text(s_lbl_wifi, LV_SYMBOL_WIFI);
         if (s_wifi_blink_visible) {
             lv_obj_clear_flag(s_lbl_wifi, LV_OBJ_FLAG_HIDDEN);
@@ -487,51 +618,44 @@ static void ui_update_wifi_symbol(void) {
 static void ui_update_main_page(void) {
     char buf[64];
 
-    // 顶部信息栏：左侧日期时间，右侧 Wi-Fi 符号 (靠最右)
-    // 时间通过 SNTP 同步并转换为澳大利亚东部标准时间 (AEST/AEDT，自动夏令时)，
-    // Wi-Fi 状态使用 LVGL 内置符号 LV_SYMBOL_WIFI (U+F1EB)，
-    // 该符号已包含在 lv_font_montserrat_20 字库中，无需额外加载字体。
+    // 1. 顶部状态栏
     format_local_time(buf, sizeof(buf));
     lv_label_set_text(s_lbl_time, buf);
     ui_update_wifi_symbol();
 
-    // 当前室温 (保留 1 位小数)
-    snprintf(buf, sizeof(buf), "%.1f C", s_dev->current_temp);
-    lv_label_set_text(s_lbl_room_temp, buf);
+    // 2. 中央当前温度 (整数, 如 23°)
+    int cur_int = (int)roundf(s_dev->current_temp);
+    snprintf(buf, sizeof(buf), "%d°", cur_int);
+    lv_label_set_text(s_lbl_current_temp, buf);
 
-    // 室温下方的 "TEMP" 标签
-    lv_label_set_text(s_lbl_room_label, "TEMP");
+    // 3. 当前温度蓝色圆弧进度更新 (15.0 ~ 25.0)
+    int arc_val = (int)(s_dev->current_temp * 10.0f);
+    if (arc_val < (int)(TEMP_MIN * 10)) arc_val = (int)(TEMP_MIN * 10);
+    if (arc_val > (int)(TEMP_MAX * 10)) arc_val = (int)(TEMP_MAX * 10);
+    lv_arc_set_value(s_arc_current, arc_val);
 
-    // 设定温度 (保留 1 位小数)
-    snprintf(buf, sizeof(buf), "SET: %.1f C", s_dev->target_temp);
-    lv_label_set_text(s_lbl_set_temp, buf);
+    // 4. 目标温度黄色圆弧与读数更新
+    int target_step_val = (int)roundf(s_dev->target_temp * 2.0f);
+    if (target_step_val < 30) target_step_val = 30;
+    if (target_step_val > 50) target_step_val = 50;
+    lv_arc_set_value(s_arc_target, target_step_val);
 
-    // 最后10秒：设定温度行闪烁 (亮0.5s / 灭0.5s)
-    if (s_last_timer_remaining_sec > 0 && s_last_timer_remaining_sec <= 10) {
-        if (s_blink_visible) {
-            lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
-        }
-    } else {
-        lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
-    }
+    snprintf(buf, sizeof(buf), "%.1f°", s_dev->target_temp);
+    lv_label_set_text(s_lbl_target_temp_val, buf);
+    update_target_indicator_pos(s_dev->target_temp);
 
-    // 加热状态
+    // 5. 加热状态卡片
     if (s_dev->is_heating) {
-        lv_label_set_text(s_lbl_heat, "HEAT");
-        lv_obj_set_style_text_color(s_lbl_heat, lv_color_hex(0xFF0000), 0);
-        // 加热中：透明背景 (不显示黑底)
-        lv_obj_set_style_bg_opa(s_lbl_heat, LV_OPA_TRANSP, 0);
+        lv_label_set_text(s_lbl_heat_status, "HEAT");
+        lv_obj_set_style_text_color(s_lbl_heat_status, lv_color_hex(0xFF3333), 0);
+        lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0xFF3333), 0);
     } else {
-        lv_label_set_text(s_lbl_heat, "OFF");
-        // 需求：主页面最左下角的 OFF 设置为黑底白字
-        lv_obj_set_style_text_color(s_lbl_heat, lv_color_white(), 0);
-        lv_obj_set_style_bg_opa(s_lbl_heat, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(s_lbl_heat, lv_color_black(), 0);
+        lv_label_set_text(s_lbl_heat_status, "OFF");
+        lv_obj_set_style_text_color(s_lbl_heat_status, lv_color_hex(0x94A3B8), 0);
+        lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0x243044), 0);
     }
 
-    // 定时状态 (按钮第二行)：倒计时中显示 mm:ss (仅数字)，未开启显示 OFF
+    // 6. Sleep Timer 卡片
     if (s_dev->sleep_timer_active && s_dev->sleep_timer_setting > 0) {
         int remaining = timer_remaining_seconds(s_dev);
         if (remaining > 0) {
@@ -541,73 +665,56 @@ static void ui_update_main_page(void) {
         } else {
             snprintf(buf, sizeof(buf), "00:00");
         }
-        // 倒计时进行中：按钮边框高亮 (青色)，提示定时已开启
+        lv_label_set_text(s_lbl_timer_val, buf);
+        lv_obj_set_style_text_color(s_lbl_timer_val, lv_color_hex(0x00FF7F), 0);
         lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x00FF7F), 0);
     } else {
         snprintf(buf, sizeof(buf), "OFF");
-        // 未开启：按钮边框为默认青色
-        lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x00BFFF), 0);
+        lv_label_set_text(s_lbl_timer_val, buf);
+        lv_obj_set_style_text_color(s_lbl_timer_val, lv_color_hex(0x94A3B8), 0);
+        lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x243044), 0);
     }
-    lv_label_set_text(s_lbl_timer, buf);
 }
 
 // 更新待机页显示内容
 static void ui_update_standby_page(void) {
     char buf[64];
 
-    // 顶部信息栏 (时间显示澳大利亚东部标准时间 AEST/AEDT，自动夏令时；
-    // Wi-Fi 状态使用 LVGL 内置符号 LV_SYMBOL_WIFI，未连接时闪烁)
     format_local_time(buf, sizeof(buf));
     lv_label_set_text(s_lbl_time, buf);
     ui_update_wifi_symbol();
 
-    // 当前室温 (中号字)
-    snprintf(buf, sizeof(buf), "%.1f C", s_dev->current_temp);
-    lv_label_set_text(s_lbl_room_temp, buf);
+    int cur_int = (int)roundf(s_dev->current_temp);
+    snprintf(buf, sizeof(buf), "%d°", cur_int);
+    lv_label_set_text(s_lbl_current_temp, buf);
 
-    // STANDBY 大字
     lv_label_set_text(s_lbl_standby, "STANDBY");
 }
 
-// 根据当前状态切换页面显示
+// 状态分发渲染
 static void ui_render(void) {
     if (!s_dev) return;
 
-    // 校准模式：校准页面已由 lcd_display_calib_show() 显示并覆盖普通 UI，
-    // 此处直接返回，避免普通 UI 刷新覆盖校准页面。
     if (s_calib_active) {
         return;
     }
 
-    // 待机模式：显示待机页
+    // 待机模式
     if (s_dev->mode == THERMOSTAT_MODE_STANDBY) {
         lv_obj_clear_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_btn_timer, LV_OBJ_FLAG_HIDDEN);
-        // 隐藏 Sleep Timer 设置页控件
+        lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
         for (int i = 0; i < 4; i++) {
             lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
         }
-        // 待机页室温与主页面一致，用超大号字 (48 号字)
-        lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
         ui_update_standby_page();
         return;
     }
 
-    // 开机模式 + Sleep Timer 设置页：显示 Sleep Timer 设置页
+    // Sleep Timer 设置页
     if (s_dev->current_page == UI_PAGE_SLEEP_TIMER) {
-        // 隐藏主页面/待机页元素
         lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_btn_timer, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_lbl_room_temp, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_lbl_room_label, LV_OBJ_FLAG_HIDDEN);
-        // 显示 Sleep Timer 设置页控件
+        lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
         for (int i = 0; i < 4; i++) {
             lv_obj_clear_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
@@ -616,20 +723,13 @@ static void ui_render(void) {
         return;
     }
 
-    // 开机模式 + 主页面：显示主页面
+    // 开机主页面
     lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_set_temp, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_heat, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_timer, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_btn_timer, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_room_temp, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(s_lbl_room_label, LV_OBJ_FLAG_HIDDEN);
-    // 隐藏 Sleep Timer 设置页控件
+    lv_obj_clear_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
     for (int i = 0; i < 4; i++) {
         lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_set_style_text_font(s_lbl_room_temp, &lv_font_montserrat_48, 0);
     ui_update_main_page();
 }
 
@@ -675,18 +775,11 @@ esp_err_t lcd_display_init(thermostat_dev_t *dev) {
 
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
-    // 本面板无需反色；若开启反色会导致黑/白互换（黑底变白底）
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, false));
-    // 直接对面板硬件应用水平镜像，修正屏幕左右镜像。
-    // 注意：disp_cfg.rotation.mirror_x 仅在 lv_disp_set_rotation() 触发
-    // lvgl_port_update_callback() 时才会被应用到面板，而本代码从不调用该函数，
-    // 因此必须在此处直接调用 esp_lcd_panel_mirror() 才能生效。
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, true, false));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
-    // ---- 4. 初始化 LVGL 端口 (必须先于 lvgl_port_add_disp 调用) ----
-    // 该函数会初始化 LVGL 内存池并创建 LVGL 定时器/任务，
-    // 若未调用则 lvgl_port_add_disp 内部 lv_mem_alloc 会因内存池未初始化而崩溃
+    // ---- 4. 初始化 LVGL 端口 ----
     const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     ESP_RETURN_ON_ERROR(lvgl_port_init(&lvgl_cfg), TAG, "LVGL port init failed");
 
@@ -701,7 +794,7 @@ esp_err_t lcd_display_init(thermostat_dev_t *dev) {
         .monochrome = false,
         .rotation = {
             .swap_xy = false,
-            .mirror_x = true,   // 修正左右镜像
+            .mirror_x = true,
             .mirror_y = false,
         },
     };
@@ -711,15 +804,23 @@ esp_err_t lcd_display_init(thermostat_dev_t *dev) {
         return ESP_FAIL;
     }
 
-    // ---- 6. 创建 UI 控件 ----
+    // ---- 6. 注册 LVGL 触摸输入设备 ----
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = lvgl_touch_read_cb;
+    s_indev_touch = lv_indev_drv_register(&indev_drv);
+
+    // ---- 7. 创建 UI 控件 ----
     lvgl_port_lock(0);
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x0A0D14), 0);
     ui_create_main_page();
     ui_create_sleep_timer_page();
     ui_create_calib_page();
+    ui_render();
     lvgl_port_unlock();
 
-    ESP_LOGI(TAG, "LCD display initialized: %dx%d", LCD_H_RES, LCD_V_RES);
+    ESP_LOGI(TAG, "LCD display initialized with Thermometer UI: %dx%d", LCD_H_RES, LCD_V_RES);
     return ESP_OK;
 }
 
@@ -727,10 +828,8 @@ void lcd_display_update(thermostat_dev_t *dev) {
     if (!dev || !s_disp) return;
     s_dev = dev;
 
-    // 计算当前倒计时剩余秒数 (未倒计时为 -1)
     int remaining_sec = timer_remaining_seconds(dev);
 
-    // 检测状态变化，仅在变化时刷新 UI
     bool changed = false;
     if (dev->current_temp != s_last_room_temp ||
         dev->target_temp != s_last_set_temp ||
@@ -744,9 +843,6 @@ void lcd_display_update(thermostat_dev_t *dev) {
         changed = true;
     }
 
-    // 检测顶部时间变化 (分钟变化时强制刷新，使时间显示保持最新)
-    // 注意：仅在开机/待机主页面显示时间，Sleep Timer 设置页不显示时间，
-    // 但为简单起见统一检测，刷新开销可忽略。
     {
         char now_time[32];
         format_local_time(now_time, sizeof(now_time));
@@ -757,7 +853,7 @@ void lcd_display_update(thermostat_dev_t *dev) {
         }
     }
 
-    // 最后10秒闪烁逻辑：亮0.5s / 灭0.5s
+    // 倒计时最后 10 秒闪烁
     if (remaining_sec > 0 && remaining_sec <= 10) {
         int64_t now_ms = esp_timer_get_time() / 1000;
         if (s_last_blink_toggle_ms == 0) {
@@ -766,16 +862,14 @@ void lcd_display_update(thermostat_dev_t *dev) {
         } else if (now_ms - s_last_blink_toggle_ms >= 500) {
             s_last_blink_toggle_ms = now_ms;
             s_blink_visible = !s_blink_visible;
-            changed = true; // 闪烁状态变化，触发重绘
+            changed = true;
         }
     } else {
-        // 非最后10秒：复位闪烁状态
         s_last_blink_toggle_ms = 0;
         s_blink_visible = true;
     }
 
-    // Wi-Fi 未连接时闪烁符号逻辑：亮0.5s / 灭0.5s
-    // 当前字库无 "Wi-Fi 断开" 符号，故通过闪烁提示网络未连接。
+    // Wi-Fi 未连接时闪烁
     if (!dev->wifi_connected) {
         int64_t now_ms = esp_timer_get_time() / 1000;
         if (s_last_wifi_blink_toggle_ms == 0) {
@@ -784,10 +878,9 @@ void lcd_display_update(thermostat_dev_t *dev) {
         } else if (now_ms - s_last_wifi_blink_toggle_ms >= 500) {
             s_last_wifi_blink_toggle_ms = now_ms;
             s_wifi_blink_visible = !s_wifi_blink_visible;
-            changed = true; // 闪烁状态变化，触发重绘
+            changed = true;
         }
     } else {
-        // Wi-Fi 已连接：复位闪烁状态，符号常亮
         s_last_wifi_blink_toggle_ms = 0;
         s_wifi_blink_visible = true;
     }
@@ -807,11 +900,4 @@ void lcd_display_update(thermostat_dev_t *dev) {
         ui_render();
         lvgl_port_unlock();
     }
-
-    // 注意：不要在此处调用 lv_timer_handler()！
-    // lvgl_port_init() 已创建内部 "LVGL task"，该任务会持续调用 lv_timer_handler()
-    // 进行渲染刷新。若此处再调用一次，会导致两个任务并发执行 lv_timer_handler()，
-    // 破坏 LVGL 内部状态（显示缓冲/刷新状态机），长期运行后可能引发内存损坏与系统崩溃。
-    // 本函数仅负责在 lvgl_port_lock() 保护下更新 UI 控件状态，
-    // 实际的渲染刷新由 esp_lvgl_port 的内部任务完成。
 }

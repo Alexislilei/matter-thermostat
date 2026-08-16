@@ -385,44 +385,59 @@
 
 ---
 
+### 3.22 LVGL 240x320 竖屏温控器主界面 UI 重构与开发（已完成）
+根据需求更新，参考官方 Thermometer Demo 风格对 240x320 竖屏主界面进行重构与开发：
+
+1. **界面裁剪与布局重构**：
+   - 去掉了官方 Demo 中右侧风扇模块，底部布局重构为对称的 HEATER 状态与 SLEEP TIMER 按钮。
+   - **顶部紧凑状态栏**：左侧显示 `Fri, Mar 11  19:45`（缩写星期/月份，24小时制，AEST/AEDT 自动夏令时），右侧显示 Wi-Fi 状态图标（连接常亮，断开 0.5s 闪烁）。
+2. **中央温度控制与显示区 (Central Arc & Temp Display)**：
+   - **温度范围**：15.0°C ~ 25.0°C（步长 0.5°C，共 21 档）。
+   - **当前温度圆弧**：深灰底轨 + 亮蓝色实心进度圆弧（`#00B4FF`），从 15°C 起始位置顺时针延伸至当前实测温度位置。
+   - **中央深色同心表盘**：正中心以 48 号大字体仅显示当前温度**整数**（例如：`23°`），下方配 `ROOM` 标签。
+   - **外圈刻度点与极值**：5 个分度圆点（15.0°, 17.5°, 20.0°, 22.5°, 25.0°），底部两侧分别标注 `15°` 与 `25°`。
+   - **目标温度指示与读数**：外圈黄色滑块指针（`#FFD700`）指示设定温度，外侧水平跟随显示 1 位小数读数（如 `22.5°`）。
+   - **目标温度双调节**：
+     - **触摸调节**：黄色指针支持在屏幕上触摸拖动，拖动时自动吸附至 0.5°C 步长。
+     - **编码器调节**：旋转编码器顺时针 +0.5°C，逆时针 -0.5°C，限制在 15.0°C ~ 25.0°C。
+3. **底部状态与操作栏 (Bottom Area)**：
+   - **左侧**：HEATER 状态卡片，显示 `HEAT`（加热中，红色高亮）或 `OFF`（未加热，灰白色）。
+   - **右侧**：SLEEP TIMER 按钮，显示 `OFF` 或倒计时 `mm:ss`（绿色高亮边框），支持点击切换开启/关闭。
+4. **LVGL 原生输入设备接入**：
+   - 在 `components/lcd_display/lcd_display.c` 中注册 `lv_indev_drv_t` 触摸驱动，实现 LVGL 原生触摸事件分发。
+   - 移除 `main/main.c` 中旧的硬编码坐标 `touch_poll_task` 轮询任务，避免双重轮询和冲突。
+5. **构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（占用 2.23MB，剩余空间 26%）。
+
+---
+
 ## 4. 未完成 / 待处理事项
 
-### 4.1 触摸屏调试（进行中，新会话接手）
-- **触摸坐标从未成功读取**：XPT2046 触摸 SPI 事务无法正常完成，坐标读取始终失败。
-- **GPIO13 初始化电平异常**：初始化时 `[DIAG] Touch CS GPIO13: level=0`，即使代码显式将其置 1，硬件上仍读到 0。怀疑引脚冲突或外部接线问题。
-- **触摸 SPI 事务干扰 LCD 显示**：启用触摸驱动后 LCD 出现严重显示异常（白屏 + 横条），禁用触摸代码后恢复正常。共享 SPI2_HOST 总线的仲裁 / CS 时序问题待深入排查。
-- **Timer 按钮功能未验证**：触摸驱动的 30 分钟倒计时按钮功能尚未在硬件上验证。
-
-### 4.2 触摸屏当前状态（已更新）
-- **当前代码状态（2026-08-16）**：用户已在硬件上为 GPIO13 (Touch CS) 增加外部上拉电阻到 3.3V。`main/main.c` 中触摸驱动初始化与触摸轮询任务已**重新启用**（见 3.18 节），`touch_driver` 组件完整保留。
-- **触摸校准功能（见 3.20 节，已完成）**：已实现首次开机自动校准流程（四点角标）、校准参数与"已校准"标记的 NVS 持久化，以及后续上电按标记跳过/执行校准的逻辑。**已通过硬件验证**：首次开机校准通过、坐标映射准确、Timer 按钮点击正常、重启后跳过校准。
-- **调试打印已屏蔽（见 3.21 节，已完成）**：触摸调试用的高频打印（`[TOUCH] IRQ` / `[DIAG] GPIO13(CS)` / `[TOUCH] touched` / `[DIAG] get_point` / `[DIAG] raw` 等）已移除，仅保留必要的触摸日志（初始化、校准加载/保存、Timer 按钮点击、错误日志）。
-- **需求文档已更新**：`docs/01_requirements.md` 新增 `5.3 触摸屏校准需求` 小节，记录首次开机校准、参数持久化、后续上电跳过校准及校准期间交互隔离等需求。
-- **下一步（新会话）**：触摸功能已基本完成，可继续后续开发工作（如其它触摸交互、页面功能等）。
+### 4.1 硬件整体联调与测试（待用户实机验证）
+- **温控主界面实机验证**：烧录最新固件，验证 240x320 竖屏圆弧仪表、黄色指针拖动、大字整数室温与底部 Sleep Timer 触摸响应。
+- **Matter 多主控绑定与控制验证**：在 Apple Home / Home Assistant / Google Home 中验证温控器目标温度同步（0.5°C 步长）与开关状态。
 
 ## 5. 关键文件清单
 
 | 文件 | 说明 |
 |------|------|
-| [`main/main.c`](main/main.c) | 主程序：初始化、触摸轮询任务、Timer 按钮逻辑、触摸校准流程（`touch_calibration_task`）、SNTP 校时 |
-| [`components/touch_driver/touch_driver.c`](components/touch_driver/touch_driver.c) | XPT2046 触摸驱动（含 `lcd_cs_gpio` 字段、NVS 校准持久化与四点角标校准算法） |
+| [`main/main.c`](main/main.c) | 主程序：系统初始化、按键轮询任务、Matter 事件同步、SNTP 校时 |
+| [`components/lcd_display/lcd_display.c`](components/lcd_display/lcd_display.c) | ILI9341 LCD 显示组件（Thermometer Demo 风格圆弧仪表、LVGL 触摸 indev 注册与渲染） |
+| [`components/lcd_display/include/lcd_display.h`](components/lcd_display/include/lcd_display.h) | LCD 显示组件头文件 |
+| [`components/touch_driver/touch_driver.c`](components/touch_driver/touch_driver.c) | XPT2046 触摸驱动（含 NVS 校准持久化与四点角标校准算法） |
 | [`components/touch_driver/include/touch_driver.h`](components/touch_driver/include/touch_driver.h) | 触摸驱动头文件 |
-| [`components/lcd_display/lcd_display.c`](components/lcd_display/lcd_display.c) | ILI9341 LCD 显示组件（与触摸共用 SPI2_HOST 总线） |
-| [`components/button_handler/button_handler.c`](components/button_handler/button_handler.c) | 物理按键处理（PCNT 编码器） |
-| [`components/thermostat_logic/thermostat_logic.c`](components/thermostat_logic/thermostat_logic.c) | 温控逻辑 |
+| [`components/button_handler/button_handler.c`](components/button_handler/button_handler.c) | 物理按键处理（PCNT 编码器 ±0.5°C 调节与 FUNC 切换） |
+| [`components/thermostat_logic/thermostat_logic.c`](components/thermostat_logic/thermostat_logic.c) | 温控逻辑（迟滞算法 ±0.5°C、15.0°C ~ 25.0°C 目标温控、Sleep Timer） |
 | [`components/crash_monitor/crash_monitor.c`](components/crash_monitor/crash_monitor.c) | 崩溃监控组件 |
-| [`docs/01_requirements.md`](docs/01_requirements.md) | 需求文档 |
+| [`docs/01_requirements.md`](docs/01_requirements.md) | 需求规格说明书 (v0.3) |
 | [`docs/02_sdkconfig_note.md`](docs/02_sdkconfig_note.md) | sdkconfig 说明 |
+| [`docs/project_status.md`](docs/project_status.md) | 工程状态记录文档 |
 
 ## 6. 新会话接手建议
 
-### 6.1 触摸屏功能（已完成，可继续后续开发）
-触摸屏功能已基本完成并通过硬件验证：
-- **触摸驱动**：XPT2046 触摸检测、坐标读取、压力检测均正常（见 3.16 / 3.19 节）。
-- **触摸校准**：首次开机自动校准、参数 NVS 持久化、后续上电跳过校准均正常（见 3.20 节）。
-- **Timer 按钮**：右下角 Timer 按钮触摸点击（30 分钟倒计时开关）正常（见 3.16 节）。
-- **调试打印**：触摸调试用高频打印已屏蔽，仅保留必要日志（见 3.21 节）。
-- **遗留**：GPIO13 (CS) 软件读 0 但万用表读高的现象仍存在（见 3.17 节），但不影响触摸功能，属独立既有问题，可暂不处理。
+### 6.1 UI 与触摸功能（已全部完成并通过编译）
+- **主界面**：采用 Thermometer Demo 风格圆弧仪表盘，15.0°C ~ 25.0°C 范围，当前室温整数大字，目标温度 0.5°C 精度黄色指针与读数。
+- **输入集成**：LVGL indev 注册完成，支持圆弧拖动吸附与按钮触摸，物理编码器以 ±0.5°C 步长同步调节。
+- **首次校准**：保留四点角点校准与 NVS 持久化机制。
 
 ### 6.2 硬件接线确认
 - LCD：SCK=12, MOSI=11, MISO=10, CS=2, DC=3, RESET=1, BL=0
