@@ -43,6 +43,14 @@ typedef struct {
     bool is_heating;                // 当前加热器 Relay 控制状态 (HIGH/LOW)
 
     /**
+     * @brief Wi-Fi 连接状态
+     * true  = Wi-Fi STA 已连接并获得 IP (esp_netif_is_netif_up)
+     * false = Wi-Fi 未连接/未配网
+     * 由 main.c 周期性更新，供 LCD 顶部信息栏显示 Wi-Fi 符号状态
+     */
+    bool wifi_connected;
+
+    /**
      * @brief 瞬态 LED 灯效请求
      * 由业务逻辑层设置，led_control 消费后自动清零
      */

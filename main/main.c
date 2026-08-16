@@ -23,6 +23,7 @@
 #include "button_handler.h"
 #include "app_matter.h"
 #include "lcd_display.h"
+#include "touch_driver.h"
 #include "crash_monitor.h"
 
 static const char *TAG = "MAIN";
@@ -385,6 +386,17 @@ static void custom_ntp_sync(void) {
 #define GPIO_TOUCH_CS       GPIO_NUM_13  // 触摸屏片选 (XPT2046)
 #define GPIO_TOUCH_IRQ      GPIO_NUM_23  // 触摸屏中断 (Touch IRQ)
 
+// ---- 触摸屏 Timer 按钮区域 (屏幕右下角, 底部状态栏右侧) ----
+// 屏幕为竖屏 (宽 240, 高 320)。底部状态栏位于 y=250~320，
+// 右侧为 TIMER 显示区域。触摸该区域视为按下 Timer 按钮。
+#define TIMER_BTN_X_MIN     120
+#define TIMER_BTN_X_MAX     240
+#define TIMER_BTN_Y_MIN     250
+#define TIMER_BTN_Y_MAX     320
+
+// Timer 按钮倒计时时长 (分钟)
+#define TIMER_BTN_COUNTDOWN_MIN  30
+
 static thermostat_dev_t s_thermostat;
 static dht11_config_t s_dht11;
 
@@ -455,8 +467,201 @@ static void led_ui_task(void *pvParameters) {
 // 根据温控器状态渲染主页面/待机页，并处理 LVGL 定时器
 static void lcd_ui_task(void *pvParameters) {
     while (1) {
+        // 周期性更新 Wi-Fi 连接状态，供 LCD 顶部信息栏显示 Wi-Fi 符号
+        // (已连接显示实心符号；未连接则闪烁符号)
+        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        s_thermostat.wifi_connected = (sta && esp_netif_is_netif_up(sta));
+
         lcd_display_update(&s_thermostat);
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+// 触摸校准状态标记：true 表示正在执行首次触摸校准。
+// 校准期间触摸轮询任务 (touch_poll_task) 应跳过 Timer 按钮处理，
+// 避免校准过程中的触摸被误判为按钮点击。
+static volatile bool s_touch_calibrating = false;
+
+// 等待一次有效的触摸按下，返回原始 ADC 坐标
+// 返回 true 表示成功采集到有效触摸点
+static bool calib_wait_for_press(uint16_t *raw_x, uint16_t *raw_y) {
+    // 等待按下（带超时，避免无限阻塞）
+    int timeout_ms = 0;
+    const int PRESS_TIMEOUT_MS = 30000;   // 30 秒内未按下则超时
+    while (timeout_ms < PRESS_TIMEOUT_MS) {
+        if (touch_driver_get_raw_point(raw_x, raw_y)) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+        timeout_ms += 50;
+    }
+    return false;
+}
+
+// 等待触摸释放（手指离开屏幕）
+static void calib_wait_for_release(void) {
+    // 等待释放（带超时，避免无限阻塞）
+    int timeout_ms = 0;
+    const int RELEASE_TIMEOUT_MS = 10000;  // 10 秒内未释放则继续
+    while (timeout_ms < RELEASE_TIMEOUT_MS) {
+        if (!touch_driver_is_pressed()) {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+        timeout_ms += 50;
+    }
+}
+
+// 触摸校准任务：首次上电时执行交互式校准流程
+// 流程：依次提示用户触摸屏幕 4 个角（左上/右上/左下/右下），
+// 采集每个角点的原始 ADC 值，计算校准参数并保存到 NVS。
+// 校准完成后自动退出（删除自身任务）。
+static void touch_calibration_task(void *pvParameters) {
+    ESP_LOGI(TAG, "=== Touch calibration started (first power-on) ===");
+
+    // 标记正在校准，触摸轮询任务跳过 Timer 按钮处理
+    s_touch_calibrating = true;
+
+    // 显示校准页面
+    lcd_display_calib_show();
+
+    // 4 个角点的原始采样值 [raw_x, raw_y]
+    uint16_t raw_tl[2], raw_tr[2], raw_bl[2], raw_br[2];
+    bool ok = true;
+
+    // 步骤 1：左上角
+    lcd_display_calib_set_step(TOUCH_CALIB_STEP_TL);
+    if (!calib_wait_for_press(&raw_tl[0], &raw_tl[1])) {
+        ESP_LOGE(TAG, "Calibration timeout at TOP-LEFT corner");
+        ok = false;
+    }
+    calib_wait_for_release();
+
+    // 步骤 2：右上角
+    if (ok) {
+        lcd_display_calib_set_step(TOUCH_CALIB_STEP_TR);
+        if (!calib_wait_for_press(&raw_tr[0], &raw_tr[1])) {
+            ESP_LOGE(TAG, "Calibration timeout at TOP-RIGHT corner");
+            ok = false;
+        }
+        calib_wait_for_release();
+    }
+
+    // 步骤 3：左下角
+    if (ok) {
+        lcd_display_calib_set_step(TOUCH_CALIB_STEP_BL);
+        if (!calib_wait_for_press(&raw_bl[0], &raw_bl[1])) {
+            ESP_LOGE(TAG, "Calibration timeout at BOTTOM-LEFT corner");
+            ok = false;
+        }
+        calib_wait_for_release();
+    }
+
+    // 步骤 4：右下角
+    if (ok) {
+        lcd_display_calib_set_step(TOUCH_CALIB_STEP_BR);
+        if (!calib_wait_for_press(&raw_br[0], &raw_br[1])) {
+            ESP_LOGE(TAG, "Calibration timeout at BOTTOM-RIGHT corner");
+            ok = false;
+        }
+        calib_wait_for_release();
+    }
+
+    if (ok) {
+        // 计算校准参数
+        touch_calibration_t calib;
+        esp_err_t err = touch_driver_calibrate_from_corners(
+                raw_tl, raw_tr, raw_bl, raw_br, &calib);
+        if (err == ESP_OK) {
+            // 保存到 NVS 并应用
+            err = touch_driver_save_calibration(&calib);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Touch calibration completed and saved to NVS");
+            } else {
+                ESP_LOGE(TAG, "Failed to save calibration to NVS: %d", err);
+                // 即使保存失败，也应用当前计算的校准参数
+                touch_driver_set_calibration(&calib);
+            }
+        } else {
+            ESP_LOGE(TAG, "Calibration computation failed: %d", err);
+        }
+    } else {
+        ESP_LOGE(TAG, "Calibration aborted due to timeout");
+    }
+
+    // 校准完成：隐藏校准页面，恢复普通 UI
+    lcd_display_calib_set_step(TOUCH_CALIB_STEP_DONE);
+    vTaskDelay(pdMS_TO_TICKS(1000));   // 短暂显示完成提示
+    lcd_display_calib_hide();
+
+    // 清除校准标记，恢复触摸轮询任务
+    s_touch_calibrating = false;
+
+    ESP_LOGI(TAG, "=== Touch calibration finished ===");
+    vTaskDelete(NULL);
+}
+
+// 2.2 触摸屏轮询任务 (200ms 周期)
+// 读取 XPT2046 触摸点，检测右下角 Timer 按钮的"按下-释放"点击事件，
+// 点击一次开启 30 分钟倒计时，再次点击关闭倒计时。
+// 注意：触摸屏与 LCD 共用 SPI 总线，轮询周期不宜过短，否则会持续占用
+// 共享总线、干扰 LCD 帧刷新（导致白屏/横线）。200ms 周期在响应速度与
+// 总线占用之间取得平衡。
+static void touch_poll_task(void *pvParameters) {
+    // 触摸按下状态机：
+    //   s_touch_btn_pressed = true 表示手指当前按在 Timer 按钮区域内
+    //   当手指释放 (touched=false) 且之前按在按钮区域内时，触发一次点击
+    bool btn_pressed = false;
+
+    while (1) {
+        // 校准期间跳过 Timer 按钮处理，避免校准触摸被误判为按钮点击
+        if (s_touch_calibrating) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        touch_point_t point;
+        if (touch_driver_get_point(&point) == ESP_OK) {
+            // 判断触摸点是否落在 Timer 按钮区域内
+            bool in_btn = point.touched &&
+                          point.x >= TIMER_BTN_X_MIN && point.x <= TIMER_BTN_X_MAX &&
+                          point.y >= TIMER_BTN_Y_MIN && point.y <= TIMER_BTN_Y_MAX;
+
+            if (in_btn) {
+                // 手指按在按钮区域内
+                btn_pressed = true;
+            } else if (btn_pressed && !point.touched) {
+                // 手指已释放，且之前按在按钮区域内 -> 触发一次点击
+                btn_pressed = false;
+
+                // 仅在开机主页面下响应 Timer 按钮
+                if (s_thermostat.mode == THERMOSTAT_MODE_ON &&
+                    s_thermostat.current_page == UI_PAGE_MAIN) {
+
+                    int64_t now_ms = esp_timer_get_time() / 1000;
+
+                    if (s_thermostat.sleep_timer_active) {
+                        // 倒计时进行中 -> 关闭倒计时
+                        s_thermostat.sleep_timer_active = false;
+                        s_thermostat.sleep_timer_start_ms = 0;
+                        s_thermostat.sleep_timer_setting = 0;
+                        ESP_LOGI(TAG, "Touch Timer button -> Countdown OFF");
+                    } else {
+                        // 未倒计时 -> 开启 30 分钟倒计时
+                        s_thermostat.sleep_timer_setting = TIMER_BTN_COUNTDOWN_MIN;
+                        s_thermostat.sleep_timer_active = true;
+                        s_thermostat.sleep_timer_start_ms = now_ms;
+                        ESP_LOGI(TAG, "Touch Timer button -> %d min countdown started",
+                                 TIMER_BTN_COUNTDOWN_MIN);
+                    }
+                }
+            } else if (!in_btn && point.touched) {
+                // 手指按在按钮区域外，保持未按下状态
+                btn_pressed = false;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -537,13 +742,14 @@ void app_main(void) {
     gpio_set_level(GPIO_LCD_DC, 1);
     ESP_LOGI(TAG, "LCD control pins configured: BL=HIGH, RESET=HIGH, CS=HIGH, DC=HIGH");
 
-    //    b) SPI 数据引脚 (SCK/MOSI/MISO) 与触摸屏引脚 (Touch CS/IRQ)：
-    //       配置为输入并启用内部上拉，防止悬空导致误触发
+    //    b) SPI 数据引脚 (SCK/MOSI/MISO) 与触摸屏中断引脚 (Touch IRQ)：
+    //       配置为输入并启用内部上拉，防止悬空导致误触发。
+    //       注意：触摸屏片选 (Touch CS) 不在此配置，由 touch_driver_init()
+    //       配置为输出并手动控制，以避免干扰共享 SPI 总线。
     gpio_config_t lcd_spi_conf = {
         .pin_bit_mask = (1ULL << GPIO_LCD_SCK) |
                         (1ULL << GPIO_LCD_MOSI) |
                         (1ULL << GPIO_LCD_MISO) |
-                        (1ULL << GPIO_TOUCH_CS) |
                         (1ULL << GPIO_TOUCH_IRQ),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,   // 内部上拉，防止引脚悬空
@@ -551,7 +757,7 @@ void app_main(void) {
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&lcd_spi_conf));
-    ESP_LOGI(TAG, "LCD SPI & touch pins configured with internal pull-up");
+    ESP_LOGI(TAG, "LCD SPI & touch IRQ pins configured with internal pull-up");
 
     // 3. 初始化核心逻辑与加热器 GPIO
     ESP_ERROR_CHECK(thermostat_init(&s_thermostat, GPIO_HEATER_RELAY));
@@ -574,6 +780,47 @@ void app_main(void) {
 
     // 7. 初始化 LCD 显示 (ILI9341 + LVGL)
     ESP_ERROR_CHECK(lcd_display_init(&s_thermostat));
+
+    // 7.1 初始化 XPT2046 触摸屏驱动
+    //     注意：触摸屏与 LCD 共用 SPI2_HOST 总线，必须在 lcd_display_init()
+    //     之后调用（该函数初始化了 SPI 总线）。
+    // 【2026-08-16 重新启用】用户已在硬件上为 GPIO13 (Touch CS) 增加外部上拉
+    //     电阻到 3.3V，用于解决此前 GPIO13 初始化电平异常 (level=0) 的问题。
+    //     现重新启用触摸驱动初始化与触摸轮询任务，验证触摸功能是否恢复正常。
+    //
+    // 校准参数：若 NVS 中已保存校准参数（已校准），则加载使用；
+    // 否则使用默认参数，并在首次上电时执行交互式校准流程（见下方 9.1 节）。
+    touch_config_t touch_cfg = {
+        .spi_host = SPI2_HOST,
+        .cs_gpio  = GPIO_TOUCH_CS,
+        .irq_gpio = GPIO_TOUCH_IRQ,
+        .lcd_cs_gpio = GPIO_LCD_CS,   // 触摸 SPI 事务期间强制关闭 LCD 片选，避免共享总线干扰
+        .calibration = {
+            .x_min = 300,
+            .x_max = 3800,
+            .y_min = 300,
+            .y_max = 3800,
+            .swap_xy = false,
+            .invert_x = false,
+            .invert_y = false,
+        },
+    };
+    ESP_ERROR_CHECK(touch_driver_init(&touch_cfg));
+
+    // 7.2 检查触摸屏校准状态
+    //     若 NVS 中已有"已校准"标记，则加载校准参数，无需重新校准；
+    //     否则在首次上电时执行交互式校准流程（见 9.1 节）。
+    if (touch_driver_is_calibrated()) {
+        // 已校准：从 NVS 加载校准参数（内部会更新运行时校准参数）
+        touch_calibration_t saved_calib;
+        if (touch_driver_load_calibration(&saved_calib)) {
+            ESP_LOGI(TAG, "Touch already calibrated, loaded calibration from NVS");
+        } else {
+            ESP_LOGW(TAG, "Calibrated flag set but load failed, will re-calibrate");
+        }
+    } else {
+        ESP_LOGI(TAG, "Touch NOT calibrated, will run calibration on first power-on");
+    }
 
     // 8. 初始化 Matter 协议栈
     ESP_ERROR_CHECK(app_matter_init(&s_thermostat));
@@ -601,6 +848,21 @@ void app_main(void) {
     xTaskCreate(led_ui_task,       "led_ui_task",       3072, NULL, 4, NULL);
     xTaskCreate(lcd_ui_task,       "lcd_ui_task",       8192, NULL, 4, NULL);
     xTaskCreate(button_poll_task,  "button_poll_task",  3072, NULL, 6, NULL);
+    // 触摸轮询任务：检测触摸屏按下，映射到 Timer 按钮并切换 30 分钟倒计时。
+    // 触摸屏与 LCD 共用 SPI2_HOST 总线，触摸驱动已改为手动控制片选 (spics_io_num=-1)，
+    // 避免 spi_bus_add_device() 重新配置共享总线导致 LCD 显示异常。
+    // 【2026-08-16 重新启用】配合 GPIO13 外部上拉修复，重新启用触摸轮询任务。
+    xTaskCreate(touch_poll_task,   "touch_poll_task",   3072, NULL, 4, NULL);
+
+    // 9.1 首次上电触摸校准
+    //     若 NVS 中无"已校准"标记，则启动交互式校准任务。
+    //     校准任务会显示校准页面，引导用户依次触摸屏幕 4 个角，
+    //     采集原始 ADC 值计算校准参数并保存到 NVS，完成后自动退出。
+    //     已校准的设备跳过此流程，直接使用 NVS 中保存的校准参数。
+    if (!touch_driver_is_calibrated()) {
+        xTaskCreate(touch_calibration_task, "touch_calib_task", 4096, NULL, 5, NULL);
+        ESP_LOGI(TAG, "Touch calibration task started (first power-on)");
+    }
 
     ESP_LOGI(TAG, "Initialization complete. Thermostat tasks running.");
 }

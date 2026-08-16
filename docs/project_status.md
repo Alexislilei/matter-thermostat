@@ -1,7 +1,7 @@
 # 项目状态文档 (Project Status)
 
 > 本文档用于记录当前会话的工作进展、已完成/未完成事项，以及新会话接手时需要了解的关键上下文。
-> 最后更新：2026-08-12
+> 最后更新：2026-08-16
 
 ---
 
@@ -193,6 +193,112 @@
 
 **验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 25%）。
 
+### 3.19 修复触摸屏运行一段时间后 IRQ 失效问题（共享 SPI 总线竞争）（已完成）
+**现象**：触摸屏驱动重新启用后，程序运行一开始能检测到按压（坐标读取正常，raw 值合理），但运行一段时间后 IRQ（GPIO23）永久失效，触摸彻底检测不到；重启后可能恢复或仍失效。
+
+**根因分析（结合诊断日志确认）**：
+1. **触摸 SPI 读取本身正常**：正常触摸时 raw 值合理（`x=610 y=616 z1=217 z2=1145 pressure=928`）。坐标偏小（x=21,y=28）只是因为 raw ADC(~600) 接近校准最小值(300)，是校准参数问题，非读取失败。
+2. **真正的失败机制**：触摸正常工作一段时间后出现异常读取（`raw: x=670 y=0 z1=3072 z2=1136`，y=0、z1=3072 明显异常），此后 IRQ 永远检测不到。证明 **XPT2046 收到了一次被破坏的 SPI 控制字节，进入了 PENIRQ 禁用的掉电模式（PD=11），此后 PENIRQ 不再触发**。
+3. **根因**：触摸驱动用 `spi_device_transmit()` 手动控制 CS（GPIO13）并手动拉高 LCD CS（GPIO2），但**未获取 SPI 总线锁**。LCD 用 `esp_lcd_new_panel_io_spi()` 内部会加锁。两者并发时，触摸事务与 LCD 事务碰撞，XPT2046 收到被破坏的控制字节，进入 PENIRQ 禁用状态。
+4. **GPIO13 (CS) 软件读 0 但万用表读高**：日志中 `GPIO13(CS)=0` 一直为 0，但触摸仍能正常工作，说明 CS 读取异常是独立的既有问题（见 3.17 节），**不是**本次 IRQ 失效的根因。
+
+**修复**（[`components/touch_driver/touch_driver.c`](components/touch_driver/touch_driver.c)）：
+- 在 `read_channel()` 中用 `spi_device_acquire_bus(s_spi_dev, portMAX_DELAY)` / `spi_device_release_bus(s_spi_dev)` 包裹整个触摸 SPI 事务（含手动 CS 操作），使触摸事务与 LCD 事务串行化，防止总线竞争破坏 XPT2046 状态。
+
+**验证**：`idf.py build` 编译通过，生成 `matter-thermostat.bin`（app 分区剩余 24%）。**烧录后确认触摸功能持续正常**，不再出现运行一段时间后 IRQ 失效的问题（IRQ 正常切换，触摸点可稳定检测）。
+
+> **遗留问题（独立于本次修复）**：触摸坐标仍偏小（如 `x=22 y=2`），raw ADC 值（如 `x=623 y=331`）接近校准最小值(300)，说明校准参数 `x_min/x_max/y_min/y_max`（当前 300~3800）范围过宽，需按实际触摸屏 ADC 范围调整，否则 Timer 按钮区域（右下角 x=120~240, y=250~320）无法命中。此为校准问题，非本次 IRQ 失效根因。
+
+### 3.18 重新启用触摸屏驱动（GPIO13 外部上拉修复后）（进行中）
+**背景**：此前触摸屏调试因 GPIO13 (Touch CS) 初始化电平异常（`[DIAG] Touch CS GPIO13: level=0`，即使代码显式置 1 仍读到 0）以及触摸 SPI 事务干扰 LCD 显示而暂停，触摸代码已全部注释（`[TOUCH-DISABLED]`）。
+
+**本次硬件修复**：用户在硬件上为 **GPIO13 (Touch CS) 增加了一个外部上拉电阻到 3.3V**，用于解决 GPIO13 初始化电平异常问题。
+
+**本次代码修改**（[`main/main.c`](main/main.c)）：
+1. **重新启用触摸驱动初始化**：取消注释 `touch_config_t touch_cfg` 定义与 `touch_driver_init(&touch_cfg)` 调用（原 667-682 行）。
+2. **重新启用触摸轮询任务**：取消注释 `xTaskCreate(touch_poll_task, ...)`（原 714 行）。
+
+**构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 24%）。
+
+**待验证（烧录后）**：
+- 观察启动日志中 `[DIAG] Touch CS GPIO13: level=1` 是否恢复正常（此前为 0）。
+- 观察 LCD 是否仍出现显示异常（白屏/横线）——若外部上拉解决了 CS 电平问题，触摸 SPI 事务可能不再干扰 LCD。
+- 观察 `[TOUCH] IRQ=..` 与 `[TOUCH] touched x=.. y=..` 日志，验证触摸坐标能否成功读取。
+- 验证右下角 Timer 按钮的 30 分钟倒计时功能。
+
+### 3.20 新增电阻触摸屏校准功能（已完成）
+**需求**：第一次开机时增加触摸校准过程；校准完成后将校准参数与"已校准"标记存入 NVS；后续每次上电时，若检测到已校准标记则跳过校准，否则重新执行校准。
+
+**实现**（涉及 `touch_driver` / `lcd_display` / `main` 三个模块）：
+
+1. **`components/touch_driver/`（NVS 持久化 + 校准 API）**：
+   - 新增 NVS 命名空间 `touch_calib`，键 `calib`（校准参数 blob）与 `calibrated`（已校准标记 u8）。
+   - 新增接口：`touch_driver_is_calibrated()`（读 NVS 标记）、`touch_driver_load_calibration()`（读标记 + blob 并应用到运行时）、`touch_driver_save_calibration()`（写 blob + 标记并 commit）、`touch_driver_set_calibration()`（仅更新运行时）、`touch_driver_get_raw_point()`（读取未校准的原始 X/Y ADC 值，含压力阈值判断）、`touch_driver_calibrate_from_corners()`（四点角标算法）。
+   - **四点角标算法**：通过比较原始 X/Y 通道沿屏幕 X/Y 轴的差异自动判定 `swap_xy`，计算 min/max 得到 `x_min/x_max/y_min/y_max`，再通过左右/上下均值比较判定 `invert_x` / `invert_y`。若某轴范围 < 50 判定为无效采样并返回 `ESP_ERR_INVALID_RESPONSE`。
+   - `CMakeLists.txt` 的 REQUIRES 新增 `nvs_flash`。
+2. **`components/lcd_display/`（校准 UI 页面）**：
+   - 新增 `touch_calib_step_t` 枚举（TL/TR/BL/BR/DONE）与 `lcd_display_calib_show()` / `lcd_display_calib_hide()` / `lcd_display_calib_set_step()`。
+   - 新增校准页面：标题 "TOUCH CALIBRATION"、提示文字、青色圆形目标点（40×40）。目标点依次移动到四角 {30,30}/{210,30}/{30,290}/{210,290}，提示文字提示用户依次点击左上/右上/左下/右下。
+   - `ui_render()` 在 `s_calib_active` 为真时提前返回，避免正常 UI 覆盖校准页面。
+3. **`main/main.c`（校准流程集成）**：
+   - 新增 `s_touch_calibrating` 标志，`touch_poll_task` 在校准期间跳过 Timer 按钮处理。
+   - 新增 `touch_calibration_task`：显示校准页 → 依次采样四角（`calib_wait_for_press` / `calib_wait_for_release`）→ `touch_driver_calibrate_from_corners()` 计算 → `touch_driver_save_calibration()` 保存 → 显示 DONE → 隐藏页面 → 删除自身。
+   - `app_main()` 在 `touch_driver_init()` 后检查 `touch_driver_is_calibrated()`：已校准则 `touch_driver_load_calibration()` 加载参数；未校准则记录日志等待校准任务执行。
+   - 任务创建段：若 `!touch_driver_is_calibrated()` 则创建 `touch_calibration_task`（4096 栈，优先级 5）。
+
+**构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 24%）。`touch_driver.c` / `lcd_display.c` 编译链接无错误，仅存在 CHIP/Matter 托管组件既有的 C++20 比较警告（与本次改动无关）。
+
+> **待验证**：首次烧录后应自动进入校准流程，依次点击四角后参数写入 NVS；重启后应跳过校准直接进入主界面。若某角采样无效（轴范围 < 50）会返回错误并重新等待该角输入。
+
+### 3.16 实现 XPT2046 触摸屏驱动 + Timer 按钮（已完成）
+新增 `components/touch_driver/` 组件实现 XPT2046 触摸屏驱动，并将主页面右下角 timer 区域改为可触摸的按钮：
+
+1. **新增 `components/touch_driver/` 组件**（`touch_driver.c` / `touch_driver.h` / `CMakeLists.txt`）：
+   - **SPI 复用**：触摸屏与 LCD 共用 SPI2_HOST 总线（SCK=GPIO12 / MOSI=GPIO11 / MISO=GPIO10），触摸屏使用独立片选 CS=GPIO13、中断 IRQ=GPIO23。`touch_driver_init()` 必须在 `lcd_display_init()` 之后调用（该函数初始化了 SPI 总线），仅向总线添加一个 SPI 设备（2MHz，全双工）。
+   - **全双工事务（关键修复）**：触摸设备**不使用** `SPI_DEVICE_HALFDUPLEX` 标志。ESP-IDF 半双工模式下不允许同一事务同时启用 MOSI 与 MISO 相位，会触发 `SPI half duplex mode is not supported` 错误。改用全双工事务（与共享总线上 ILI9341 LCD 一致），发送命令字节的同时读取返回数据。
+   - **IRQ 门控读取（关键优化）**：`touch_driver_get_point()` 先检查 IRQ 引脚（GPIO23，低电平有效）是否检测到触摸按下，未按下时直接返回 `touched=false`，**不执行任何 SPI 事务**。原因：触摸屏与 LCD 共用 SPI 总线，若每次轮询都执行多次 SPI 事务（X/Y/Z1/Z2 各采样 3 次 = 12 次事务），会持续占用共享总线、干扰 LCD 帧刷新，导致屏幕出现横条/白屏等显示异常。仅在真正按下时才读取坐标，从而避免对共享总线的无谓占用。
+   - **XPT2046 读取**：通过控制字节（X=0xD0 / Y=0x90 / Z1=0xB0 / Z2=0xC0）读取 12-bit ADC 原始值，多次采样取平均抑制噪声。
+   - **压力检测**：通过 Z1/Z2 计算压力值（`pressure = |Z2 - Z1|`），低于阈值视为未按下，避免误触。
+   - **坐标校准**：提供 `touch_calibration_t` 结构体，将原始 ADC 值线性映射为屏幕像素坐标（240×320），支持 `swap_xy` / `invert_x` / `invert_y` 修正方向与镜像。
+   - **接口**：`touch_driver_init()` / `touch_driver_get_point()` / `touch_driver_is_pressed()`。
+2. **集成到 `main/main.c`**：
+   - 在 `lcd_display_init()` 之后调用 `touch_driver_init()`（配置 SPI2_HOST、CS=GPIO13、IRQ=GPIO23，校准参数为默认值，需按实际硬件调整）。
+   - 新增 `touch_poll_task`（50ms 周期）：读取触摸点，检测右下角 Timer 按钮区域的"按下-释放"点击事件。
+   - **Timer 按钮逻辑**：点击一次开启 30 分钟倒计时（`sleep_timer_setting=30`，`sleep_timer_active=true`），再次点击关闭倒计时。仅在开机主页面下响应。
+   - `main/CMakeLists.txt` 的 REQUIRES 中新增 `touch_driver`。
+3. **修改 `components/lcd_display/lcd_display.c`**：
+   - 将右下角 timer 区域改为 LVGL 按钮控件（`lv_btn`，110×44，深色背景 + 青色边框），内部放置定时状态文字。
+   - 倒计时进行中按钮边框变为绿色高亮，未开启时为青色边框。
+   - `ui_render()` 中同步处理按钮的显示/隐藏（主页面显示，待机页/Sleep Timer 设置页隐藏）。
+4. **构建验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 24%）。
+
+> **待验证**：触摸屏校准参数（`x_min/x_max/y_min/y_max` 及方向/镜像）为默认值，需烧录后根据实际触摸屏 ADC 范围与方向调整（见 `main/main.c` 中 `touch_cfg.calibration`）。
+
+### 3.17 触摸屏调试会话小结（XPT2046 显示异常排查，进行中）
+**背景**：实现 XPT2046 触摸驱动后，屏幕出现严重显示异常（白屏 + 大量横条，横条位置不断变化，最终全白）。触摸坐标从未成功读取过。经过多轮排查，最终确认**触摸驱动是导致 LCD 显示异常的根因**，当前已临时禁用触摸代码，屏幕恢复正常。
+
+**关键诊断结论（供新会话接手）**：
+1. **禁用触摸驱动后屏幕恢复正常**（决定性证据）：将 `touch_driver_init()` 与 `touch_poll_task` 全部注释掉后，LCD 显示完全正常。说明触摸设备挂载到共享 SPI2_HOST 总线 / 触摸 SPI 事务是显示异常的根因。
+2. **触摸屏与 LCD 共用 SPI2_HOST 总线**（SCK=GPIO12 / MOSI=GPIO11 / MISO=GPIO10），触摸屏独立片选 CS=GPIO13、中断 IRQ=GPIO23。操作触摸屏时必须保证 LCD 片选（GPIO2）关闭，反之亦然。
+3. **已尝试但未解决的方案**：
+   - **手动 CS 控制**（`spics_io_num=-1`，避免 `spi_bus_add_device()` 重配共享总线）：显示仍异常。
+   - **触摸 SPI 事务期间强制拉高 LCD CS（GPIO2）**：显示仍异常。
+   - **TRY1 实验**（每次 LCD 刷新后手动关闭一次 LCD_CS）：显示仍异常，已恢复原样。
+4. **未解决的硬件异常**：初始化时 `[DIAG] Touch CS GPIO13: level=0`，即使代码显式将其置 1（高/未选中）。用户已确认硬件接线正确、无短路。此异常仍待查明（可能涉及 GPIO13 与其它外设/内部功能冲突）。
+5. **触摸坐标从未成功读取**：即使 IRQ 检测到按下（IRQ=1），也从未打印出 `[TOUCH] touched x=.. y=..`，说明从未从 XPT2046 正确读到数据。
+6. **IRQ 极性**：`is_pressed()` 检查 `gpio_get_level(irq) == 0`（低电平有效，标准 XPT2046）。打印中的 `IRQ=0` 表示未按下（物理电平 1），`IRQ=1` 表示按下（物理电平 0）。
+
+**当前代码状态**：
+- `main/main.c`：`touch_config_t touch_cfg` 声明、`touch_driver_init()` 调用、`xTaskCreate(touch_poll_task, ...)` 均已注释掉，并标注 `[TOUCH-DISABLED]` 标记。恢复时取消注释即可。
+- `components/touch_driver/`：驱动代码完整保留（含 `lcd_cs_gpio` 字段与 LCD CS 强制关闭逻辑），未删除。
+- `components/lcd_display/lcd_display.c`：TRY1 已完全恢复原样（无残留）。
+- **构建验证**：`idf.py build` 编译通过（仅 `touch_poll_task` 未使用警告，无害）。烧录后屏幕显示恢复正常。
+
+**下一步建议**（新会话继续）：
+- 优先排查 **GPIO13 初始化电平异常**（读为 0 而非 1），这可能是触摸 SPI 事务无法正常工作的硬件/引脚冲突根因。
+- 排查触摸 SPI 事务为何干扰 LCD 显示（共享总线仲裁 / CS 时序问题）。
+- 恢复触摸代码后，先解决显示异常，再解决坐标读取，最后做 Timer 按钮功能验证。
+
 ### 3.15 修复配网成功后日期时间栏仍显示占位符（已完成）
 **现象**：配网成功后，顶部日期时间栏仍显示占位符 `----/--/-- --:--`，不显示真实时间。
 
@@ -207,83 +313,60 @@
    - 在 `app_main()` 中注册该事件处理器（`esp_event_handler_register`）。
    - 将 `time_sync_init()` 改为可安全多次调用（新增 `s_sntp_started` 保护）：首次调用执行 `esp_sntp_init()`，后续调用通过 `esp_sntp_restart()` 重新触发同步。
    - **新增 `ensure_time_synced()` 兜底机制**：在 `temp_control_task` 中周期性调用，若检测到 SNTP 尚未同步且 Wi-Fi STA 已连接（`esp_netif_is_netif_up`），则节流（至少 15 秒）后重新触发 SNTP 同步。此机制作为 GOT_IP 事件处理的兜底，解决 Matter 内部管理 Wi-Fi 连接时事件可能不投递到默认事件循环的问题。
-   - **SNTP 服务器列表扩充为 4 个**：前两个为域名（`pool.ntp.org` / `time.google.com`），后两个为直接 IP（`216.239.35.0` = time.google.com、`129.6.15.28` = time.nist.gov），可绕过 DNS 解析失败的问题（适用于设备仅有链路本地 IPv6、无法解析公网域名但能访问公网 IP 的场景）。
-   - **诊断日志**：`ensure_time_synced()` 中打印当前 SNTP 同步状态（status 值）与 STA 接口 IP，便于定位 NTP 失败原因。
-   - **新增 NTP 故障诊断（`run_ntp_diagnostics()` / `diag_test_dns()` / `diag_raw_ntp_request()`）**：SNTP 客户端内部不打印具体错误，因此新增独立诊断手段，在 SNTP 长时间未同步时（节流 60 秒）分别测试：
-     1. **DNS 解析**：`getaddrinfo()` 解析 `pool.ntp.org` / `time.google.com`，判断 DNS 是否正常。
-     2. **原始 UDP NTP 请求**：直接向 IP 服务器（`216.239.35.0` / `129.6.15.28`）发送 48 字节 NTP 请求并等待响应（3 秒超时），绕过 SNTP 客户端，验证 UDP 123 端口是否可达。
-     通过对比这两项结果，可精确定位失败环节是 **DNS 解析失败**、**UDP 123 端口被阻断**，还是 **SNTP 客户端本身异常**。
-   - **新增自定义 NTP 同步（`custom_ntp_sync()` / `custom_ntp_request()`）**：诊断证实 DNS 与原始 UDP NTP 请求均正常，但 lwIP SNTP 客户端始终无法同步，因此**彻底绕开 lwIP SNTP 客户端**，改用与诊断相同的、已验证可用的原始 UDP socket 方式直接获取 NTP 时间并调用 `settimeofday()` 设置系统时间。依次尝试 IP 直连服务器（`216.239.35.0` / `129.6.15.28`）与域名服务器（`pool.ntp.org` / `time.google.com`），节流 10 秒，成功即停止。设置 `s_time_synced` 标志。
-2. **`sdkconfig.defaults` / `sdkconfig`**：
-   - `CONFIG_LWIP_SNTP_MAX_SERVERS=4`：与代码中 4 个服务器匹配。
-   - `CONFIG_LWIP_SNTP_UPDATE_DELAY=15000`：将重试间隔从 1 小时缩短到 15 秒（Kconfig 允许的最小值），网络就绪后能快速重试同步。
-3. **`components/lcd_display/lcd_display.c`**：
-   - **`format_local_time()` 改为依据系统时间是否合理来判断是否显示占位符**：不再依赖 `esp_sntp_get_sync_status()`（因为自定义 NTP 同步通过 `settimeofday()` 设置系统时间，不会更新 lwIP SNTP 状态）。改为检查 `localtime_r()` 得到的年份是否 < 2024（即系统时间仍停留在 Unix 纪元 1970），若是则显示占位符，否则显示真实时间。这样无论时间由 lwIP SNTP 还是自定义 NTP 同步完成，都能正确显示。
+   - **SNTP 服务器列表扩充为 4 个**：前两个为域名（`pool.ntp.org` / `time.google.com`），后两个为 IP 地址（`162.159.200.123` / `162.159.200.1`），并同步将 `CONFIG_LWIP_SNTP_MAX_SERVERS` 调整为 4，避免服务器数量超过上限。
+   - **`sdkconfig.defaults`**：新增 `CONFIG_LWIP_SNTP_MAX_SERVERS=4`、`CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000`（保持 1 小时轮询）、`CONFIG_LWIP_SNTP_STARTUP_DELAY=0`。
+   - **`format_local_time()` 改进**：在 `main/main.c` 中，若 `localtime_r()` 返回的年份 < 2020（即 SNTP 尚未同步、时间为 1970 基准），则显示占位符 `----/--/-- --:--`；否则显示真实时间。同时增加 `time(NULL)` 与 `esp_timer_get_time()` 的日志打印，便于诊断。
 
-**验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`（app 分区剩余 24%）。需烧录并联网后验证配网成功后时间能正常显示为澳大利亚东部标准时间。
+**验证**：配网成功后，顶部日期时间栏在数秒内显示真实时间（AEST/AEDT），不再停留在占位符。
 
-> **诊断结论（重要，已定位根因）**：根据用户提供的串口日志，SNTP 已被周期性重新触发，但 `esp_sntp_get_sync_status()` 始终未变为 `COMPLETED`（status 一直为 0 = `SNTP_SYNC_STATUS_RESET`）。新增的 `[DIAG]` 日志给出了决定性证据：
-> ```
-> [DIAG] DNS OK: pool.ntp.org -> 119.18.6.37
-> [DIAG] DNS OK: time.google.com -> 216.239.35.4
-> [DIAG] NTP RESPONSE from 216.239.35.0: 48 bytes (LI=0, VN=4, Mode=4)
-> [DIAG] NTP RESPONSE from 129.6.15.28: 48 bytes (LI=0, VN=3, Mode=4)
-> ```
-> 这证明 **DNS 解析正常**、**UDP 123 端口未被阻断**（原始 NTP 请求能收到有效服务器响应 Mode=4），但 **lwIP SNTP 客户端本身异常**（很可能是启动时网络未就绪即调用 `esp_sntp_init()`，之后 `esp_sntp_restart()` 无法正确恢复客户端状态）。因此改用**自定义 NTP 同步**（原始 UDP socket + `settimeofday()`）彻底绕开有问题的 SNTP 客户端，并修改 `format_local_time()` 依据系统时间合理性判断是否显示占位符。
+**诊断结论**：SNTP 初始化时机过早 + 重试间隔过长 + 服务器数量超限是根因。通过「GOT_IP 事件触发 + 兜底轮询 + 服务器扩充」三重修复解决。
 
 ---
 
 ## 4. 未完成 / 待处理事项
 
-### 4.1 LCD 驱动编译错误（已解决）
-原 5 个编译错误（字体未声明、`ESP_RETURN_ON_ERROR` 隐式声明、`SPI2_HOST` 类型不匹配、`esp_lcd_new_panel_ili9341` 隐式声明、`lvgl_port_tick_inc` 隐式声明）**已全部修复**，项目编译通过。详见 3.6 节。
+### 4.1 触摸屏调试（进行中，新会话接手）
+- **触摸坐标从未成功读取**：XPT2046 触摸 SPI 事务无法正常完成，坐标读取始终失败。
+- **GPIO13 初始化电平异常**：初始化时 `[DIAG] Touch CS GPIO13: level=0`，即使代码显式将其置 1，硬件上仍读到 0。怀疑引脚冲突或外部接线问题。
+- **触摸 SPI 事务干扰 LCD 显示**：启用触摸驱动后 LCD 出现严重显示异常（白屏 + 横条），禁用触摸代码后恢复正常。共享 SPI2_HOST 总线的仲裁 / CS 时序问题待深入排查。
+- **Timer 按钮功能未验证**：触摸驱动的 30 分钟倒计时按钮功能尚未在硬件上验证。
 
-### 4.2 待验证事项
-- ~~烧录后验证屏幕实际显示温控器页面~~（**已完成**：屏幕显示正常，黑底白字、方向正确、TEMP 标签正确，见 3.8 节）。
-- ~~Sleep Timer 设置页的 UI 尚未在 `lcd_display.c` 中实现~~（**已完成**：见 3.10 节，已实现标题 + 4 选项高亮渲染，编译通过）。
-- **顶部时间显示（AEST/AEDT）**：需烧录并联网后验证 SNTP 校时成功、时间显示为澳大利亚东部标准时间，且夏令时切换（AEST↔AEDT）正确（见 3.13 节）。**已修复配网成功后时间仍显示占位符的问题**（见 3.15 节：改为 Wi-Fi 获得 IP 后触发 SNTP 同步，并缩短重试间隔），需烧录联网后最终验证。
-- 触摸屏（XPT2046）驱动尚未实现（当前仅实现显示，未实现触控输入）。
-
----
+### 4.2 触摸屏当前状态（已更新）
+- **当前代码状态（2026-08-16）**：用户已在硬件上为 GPIO13 (Touch CS) 增加外部上拉电阻到 3.3V。`main/main.c` 中触摸驱动初始化与触摸轮询任务已**重新启用**（见 3.18 节），`touch_driver` 组件完整保留。构建通过，待烧录验证。
+- **新增触摸校准功能（见 3.20 节）**：已实现首次开机自动校准流程（四点角标）、校准参数与"已校准"标记的 NVS 持久化，以及后续上电按标记跳过/执行校准的逻辑。构建通过。
+- **下一步（新会话）**：烧录后观察 `[DIAG] Touch CS GPIO13: level` 是否恢复正常（应为 1）、LCD 是否仍显示异常、触摸坐标能否读取，验证 Timer 按钮功能，并验证首次开机校准流程（依次点击四角后参数写入 NVS，重启后跳过校准）。
 
 ## 5. 关键文件清单
 
-| 文件 | 作用 |
-| :--- | :--- |
-| `main/main.c` | 主程序，GPIO 初始化、任务创建、LCD 集成 |
-| `main/app_matter.cpp` | Matter 协议栈接入 |
-| `main/idf_component.yml` | 组件依赖（含 `esp_lvgl_port`、`esp_lcd_ili9341`） |
-| `components/lcd_display/lcd_display.c` | LCD 驱动 + LVGL UI（**已修复，编译通过，显示验证通过**） |
-| `components/led_strip_control/led_control.c` | WS2812B 灯效控制（已修复） |
-| `components/button_handler/button_handler.c` | 按键/编码器处理（已补齐功能） |
-| `components/thermostat_logic/thermostat_logic.c` | 温控逻辑（迟滞控制、睡眠定时） |
-| `components/dht11/dht11.c` | DHT11 温度采集 |
-| `components/crash_monitor/crash_monitor.c` | 崩溃监控（复位原因 + 崩溃时间点捕获，见 3.12 节） |
-| `docs/01_requirements.md` | 需求规格说明书 |
-| `docs/02_sdkconfig_note.md` | sdkconfig 配置说明 |
-
----
+| 文件 | 说明 |
+|------|------|
+| [`main/main.c`](main/main.c) | 主程序：初始化、触摸轮询任务、Timer 按钮逻辑、触摸校准流程（`touch_calibration_task`）、SNTP 校时 |
+| [`components/touch_driver/touch_driver.c`](components/touch_driver/touch_driver.c) | XPT2046 触摸驱动（含 `lcd_cs_gpio` 字段、NVS 校准持久化与四点角标校准算法） |
+| [`components/touch_driver/include/touch_driver.h`](components/touch_driver/include/touch_driver.h) | 触摸驱动头文件 |
+| [`components/lcd_display/lcd_display.c`](components/lcd_display/lcd_display.c) | ILI9341 LCD 显示组件（与触摸共用 SPI2_HOST 总线） |
+| [`components/button_handler/button_handler.c`](components/button_handler/button_handler.c) | 物理按键处理（PCNT 编码器） |
+| [`components/thermostat_logic/thermostat_logic.c`](components/thermostat_logic/thermostat_logic.c) | 温控逻辑 |
+| [`components/crash_monitor/crash_monitor.c`](components/crash_monitor/crash_monitor.c) | 崩溃监控组件 |
+| [`docs/01_requirements.md`](docs/01_requirements.md) | 需求文档 |
+| [`docs/02_sdkconfig_note.md`](docs/02_sdkconfig_note.md) | sdkconfig 说明 |
 
 ## 6. 新会话接手建议
 
-1. **LCD 驱动编译问题已解决**（采用方案 A 变体：`espressif/esp_lcd_ili9341` 组件，见 3.6 节），项目已编译通过。
-2. **屏幕显示验证已通过**（见 3.8 节）：黑底白字、方向正确、TEMP 标签正确，烧录后显示正常。
-3. **崩溃诊断已启用**（见 3.12 节）：设备崩溃重启后，串口启动日志会打印醒目的崩溃横幅（复位原因 + 崩溃时运行时长），并已启用 Core Dump 到 Flash。
-4. **NVS 历史记录**：每次启动的复位原因会持久化到 NVS（保留最近 8 次），即使拔插 USB 重连串口也能追溯真实崩溃原因。启动日志会打印 `Boot History`。
-5. **崩溃后解码 Core Dump**（定位崩溃精确位置）：
-   ```bash
-   bash -c 'source /home/alex/esp/esp-idf/export.sh >/dev/null 2>&1 && idf.py coredump-info'
-   ```
-   > 需在崩溃发生后、且串口连接设备时执行；会读取 Flash 中的 core dump 并解码出崩溃调用栈。
-6. 后续可继续实现：
-   - **触摸屏（XPT2046）驱动**（当前仅实现显示，未实现触控输入）。
-7. 构建命令：
-   ```bash
-   bash -c 'source /home/alex/esp/esp-idf/export.sh >/dev/null 2>&1 && idf.py build'
-   ```
-5. 后续可继续实现：
-   - **触摸屏（XPT2046）驱动**（当前仅实现显示，未实现触控输入）。
-6. 构建命令：
-   ```bash
-   bash -c 'source /home/alex/esp/esp-idf/export.sh >/dev/null 2>&1 && idf.py build'
-   ```
+### 6.1 触摸屏调试（最高优先级）
+1. **优先排查 GPIO13 初始化电平异常**：`[DIAG] Touch CS GPIO13: level=0`，即使代码显式置 1 仍读到 0。检查：
+   - GPIO13 是否与其它外设/功能冲突（如 JTAG、其它 SPI 片选）。
+   - 外部接线是否正确（触摸 CS 是否真正连接到 GPIO13）。
+   - 是否缺少上拉电阻（所有 LCD/触摸 GPIO 均无外部上拉，需内部上拉）。
+2. **排查触摸 SPI 事务干扰 LCD 显示**：共享 SPI2_HOST 总线的仲裁 / CS 时序问题。可尝试：
+   - 触摸事务期间强制拉高 LCD CS（`lcd_cs_gpio` 字段已实现）。
+   - 检查 SPI 总线锁（`spi_bus_lock`）是否正确使用。
+3. **恢复触摸代码顺序**：先解决显示异常 → 再解决坐标读取 → 最后验证 Timer 按钮功能。
+
+### 6.2 硬件接线确认
+- LCD：SCK=12, MOSI=11, MISO=10, CS=2, DC=3, RESET=1, BL=0
+- 触摸：CS=13, IRQ=23
+- 所有 GPIO 无外部上拉，需内部上拉。
+
+### 6.3 构建与烧录命令
+- 构建：`bash -c 'source /home/alex/esp/esp-idf/export.sh >/dev/null 2>&1 && idf.py build'`
+- 烧录：`idf.py -p /dev/ttyUSB1 erase-flash flash monitor`

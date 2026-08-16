@@ -35,6 +35,37 @@ esp_err_t lcd_display_init(thermostat_dev_t *dev);
  */
 void lcd_display_update(thermostat_dev_t *dev);
 
+/**
+ * @brief 触摸校准步骤
+ */
+typedef enum {
+    TOUCH_CALIB_STEP_TL = 0,   // 左上角
+    TOUCH_CALIB_STEP_TR = 1,   // 右上角
+    TOUCH_CALIB_STEP_BL = 2,   // 左下角
+    TOUCH_CALIB_STEP_BR = 3,   // 右下角
+    TOUCH_CALIB_STEP_DONE = 4, // 校准完成
+} touch_calib_step_t;
+
+/**
+ * @brief 显示触摸校准页面
+ *
+ * 进入校准模式时调用，显示全屏校准页面（含标题与提示文字）。
+ * 校准页面会覆盖主页面/待机页等所有普通 UI。
+ */
+void lcd_display_calib_show(void);
+
+/**
+ * @brief 隐藏触摸校准页面，恢复普通 UI 显示
+ */
+void lcd_display_calib_hide(void);
+
+/**
+ * @brief 设置当前校准步骤，更新校准页面上的目标位置与提示文字
+ *
+ * @param step 当前要触摸的角点
+ */
+void lcd_display_calib_set_step(touch_calib_step_t step);
+
 #ifdef __cplusplus
 }
 #endif
