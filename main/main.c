@@ -368,7 +368,8 @@ static void custom_ntp_sync(void) {
 
 // 硬件引脚定义
 #define GPIO_POWER_BTN      GPIO_NUM_19
-#define GPIO_FUNC_BTN       GPIO_NUM_18
+#define GPIO_FUNC_BTN       GPIO_NUM_15
+#define GPIO_SLEEP_BTN      GPIO_NUM_18
 #define GPIO_KEY_RA         GPIO_NUM_21
 #define GPIO_KEY_RB         GPIO_NUM_20
 #define GPIO_HEATER_RELAY   GPIO_NUM_22
@@ -706,6 +707,7 @@ void app_main(void) {
     button_config_t btn_cfg = {
         .pin_power = GPIO_POWER_BTN,
         .pin_func = GPIO_FUNC_BTN,
+        .pin_sleep = GPIO_SLEEP_BTN,
         .pin_key_ra = GPIO_KEY_RA,
         .pin_key_rb = GPIO_KEY_RB,
     };

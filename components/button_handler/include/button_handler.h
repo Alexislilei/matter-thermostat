@@ -11,7 +11,8 @@ extern "C" {
 
 typedef struct {
     gpio_num_t pin_power;   // GPIO19 (POWER 按键)
-    gpio_num_t pin_func;    // GPIO18 (FUNC 编码器附加按键)
+    gpio_num_t pin_func;    // GPIO15 (FUNC 编码器附加按键)
+    gpio_num_t pin_sleep;   // GPIO18 (SLEEP 定时按键)
     gpio_num_t pin_key_ra;  // GPIO21 (旋转编码器 A相 KEY_RA)
     gpio_num_t pin_key_rb;  // GPIO20 (旋转编码器 B相 KEY_RB)
 } button_config_t;

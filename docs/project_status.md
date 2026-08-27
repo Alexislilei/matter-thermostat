@@ -1,7 +1,7 @@
 # 项目状态文档 (Project Status)
 
 > 本文档用于记录当前会话的工作进展、已完成/未完成事项，以及新会话接手时需要了解的关键上下文。
-> 最后更新：2026-08-16
+> 最后更新：2026-08-27
 
 ---
 
@@ -25,7 +25,8 @@
 | 电源/配网按键 POWER | GPIO19 | 短按待机/开机；长按 5s 配对；长按 15s 恢复出厂 |
 | 编码器 A 相 KEY_RA | GPIO21 | 板载 10k 上拉 |
 | 编码器 B 相 KEY_RB | GPIO20 | 板载 10k 上拉 |
-| 编码器按键 FUNC | GPIO18 | 板载 10k 上拉 |
+| 编码器按键 FUNC | GPIO15 | 板载 10k 上拉 |
+| 睡眠定时按键 SLEEP | GPIO18 | 板载 10k 上拉 |
 | 加热器控制 | GPIO22 | 高电平开启加热 |
 | 温度传感器 DHT11 | GPIO4 | 单总线，需滤波 |
 | 指示灯阵列 WS2812B | GPIO8 | 6 颗级联 |
@@ -39,7 +40,7 @@
 | 触摸屏片选 Touch CS | GPIO13 | **无外部上拉，需内部上拉** |
 | 触摸屏中断 Touch IRQ | GPIO23 | **无外部上拉，需内部上拉** |
 
-> **重要硬件说明**：除按键/编码器（GPIO18/19/20/21）外，**所有 TFT-LCD 与触摸屏相关 GPIO 均无外部上拉电阻**，必须在软件中配置 GPIO 内部上拉（`GPIO_PULLUP_ENABLE`）。此点已在 `main/main.c` 的 `app_main()` 中实现。
+> **重要硬件说明**：除按键/编码器（GPIO15/18/19/20/21）外，**所有 TFT-LCD 与触摸屏相关 GPIO 均无外部上拉电阻**，必须在软件中配置 GPIO 内部上拉（`GPIO_PULLUP_ENABLE`）。此点已在 `main/main.c` 的 `app_main()` 中实现。
 
 ---
 
@@ -385,6 +386,70 @@
 
 ---
 
+### 3.23 轻触开关调试完成 + 电阻触摸屏底部盲区问题排查与修复（已完成）
+
+#### 3.23.1 关闭轻触开关（物理按键）调试打印
+**背景**：轻触开关硬件已调试完毕，`button_handler.c` 中保留了一段用于调试的高频打印，每 2 秒及任意按键状态变化时打印所有按键的 GPIO 电平，会持续刷屏。
+
+**修改**（[`components/button_handler/button_handler.c`](components/button_handler/button_handler.c)）：
+- 注释掉 `button_handler_poll()` 中的 `[BUTTON DEBUG] Raw states: PWR/FUNC/SLEEP` 定时打印代码块（含 `last_raw_pwr` / `last_raw_func` / `last_raw_sleep` / `last_print_time` 四个静态变量及 if 判断）。
+
+#### 3.23.2 电阻屏底部盲区问题定位与修复
+
+**现象**：屏幕底部两个触摸按钮（HEAT / Sleep Timer），按压**上半部分**可以响应，按压**下半部分**无反应。
+
+**诊断过程（利用临时调试日志）**：
+
+为定位问题，临时开启了以下三层诊断日志：
+1. **`[TOUCH DEBUG] SPI read`**（`touch_driver.c`）：打印每次按压的原始 ADC 值（`raw_x`, `raw_y`, `z1`, `z2`, `pressure`）。
+2. **`[TOUCH DETAIL]`**（`touch_driver.c`）：在 `calibrate_point()` 内打印完整的坐标映射过程，包括 `raw(x,y)` → 校准参数 → `mapped(x,y)` → `clamped(x,y)`。
+3. **`[TOUCH INDEV] PRESSED/RELEASED`**（`lcd_display.c`）：在 LVGL 输入设备回调中打印最终传入 LVGL 的像素坐标，并实时判断坐标是否落入 HEAT 按钮（`x:[8,116], y:[246,308]`）和 Timer 按钮（`x:[124,232], y:[246,308]`）区域内。
+
+**诊断结论（通过日志精确定位）**：
+
+实测日志对比：
+| 按压位置 | `raw_y` | `mapped y` | `clamped y` | 按钮响应 |
+|---------|---------|-----------|------------|--------|
+| 按钮上半部 | 506 | 285 | 285 | ✅ 响应 |
+| 按钮下半部 | 337 | 320 | **319** | ❌ 不响应 |
+
+**根因**：校准参数 `y_min=345`（对应屏幕 Y=0 顶端，因 `invert_y=1`）。物理按压按钮下半部分时 `raw_y ≈ 337 < 345`，代入映射公式：
+```
+sy = (337 - 345) × 319 / (1815 - 345) = -8 × 319 / 1470 ≈ -1.7
+经 invert_y 后：319 - (-1) = 320 → clamp 到 319
+```
+计算结果 319 超出了按钮下边界 308，LVGL 判定触摸点落在按钮外，故不触发点击事件。
+
+**根因溯源**：上一次触摸校准时，底部靶点位于 `y=290`（距屏幕底边 30px），导致校准数据未能覆盖按钮下半部分的实际物理触摸区域（`raw_y` 极值约为 `~330`）。
+
+#### 3.23.3 修复方案
+
+1. **调整校准靶点位置**（[`components/lcd_display/lcd_display.c`](components/lcd_display/lcd_display.c)）：
+   - 顶部两点：`y=30 → y=20`（靠近顶边）
+   - 底部两点：`y=290 → y=305`（靠近底边，覆盖按钮下半部分触摸区域）
+
+2. **新增 `touch_driver_erase_calibration()` 函数**（[`components/touch_driver/touch_driver.c`](components/touch_driver/touch_driver.c) + [`include/touch_driver.h`](components/touch_driver/include/touch_driver.h)）：
+   - 打开 NVS `touch_calib` 命名空间，删除 `calib` blob 和 `calibrated` flag，commit 后关闭。
+   - 用途：在校准参数出错时可从代码层面强制清除 NVS 校准数据，下次上电自动触发重新校准。
+
+3. **强制一次性重新校准**（`main/main.c`）：
+   - 在调试期间临时调用 `touch_driver_erase_calibration()` 清除旧校准，触发用新靶点位置的重新校准流程。
+   - **校准通过后已删除此临时调用**，恢复为原来的"已校准则加载、未校准则首次执行校准"逻辑。
+
+4. **关闭所有触摸诊断日志**（调试完成后）：
+   - `touch_driver.c`：注释掉 `[TOUCH DEBUG] IRQ Pin`、`[TOUCH DEBUG] SPI read`、`[TOUCH DEBUG] Reading ignored`、`[TOUCH DETAIL]` 四组打印，并移除对应的无用局部变量（`now_ms`、`last_monitor_ms`）。
+   - `lcd_display.c`：移除 LVGL 回调中的 `[TOUCH INDEV] PRESSED/RELEASED` 日志及按钮边界判断的临时代码，恢复简洁的回调实现。
+
+**构建验证**：`idf.py build` 编译通过，exit 0，无新增错误与警告，生成 `build/matter-thermostat.bin`（app 分区剩余 26%）。
+
+**硬件验证（2026-08-27）**：
+- 重新校准后，按压两个底部按钮的上半部分和下半部分均正常响应。
+- 重启后不再触发校准流程，直接从 NVS 加载参数，行为与修复前一致。
+
+> **经验总结（触摸屏校准靶点设置原则）**：电阻屏校准靶点应尽量靠近屏幕物理边缘，覆盖实际可能被触摸到的最大 ADC 范围。靶点距边缘越远，越容易出现"物理边缘区域 raw 值超出 y_min/y_max 范围、映射后被 clamp 到极值、落在控件外"的问题。本项目建议靶点距边缘不超过 20px。
+
+---
+
 ### 3.22 LVGL 240x320 竖屏温控器主界面 UI 重构与开发（已完成）
 根据需求更新，参考官方 Thermometer Demo 风格对 240x320 竖屏主界面进行重构与开发：
 
@@ -416,6 +481,8 @@
 - **温控主界面实机验证**：烧录最新固件，验证 240x320 竖屏圆弧仪表、黄色指针拖动、大字整数室温与底部 Sleep Timer 触摸响应。
 - **Matter 多主控绑定与控制验证**：在 Apple Home / Home Assistant / Google Home 中验证温控器目标温度同步（0.5°C 步长）与开关状态。
 
+> **已解决**：轻触开关硬件调试完成（2026-08-27）；电阻屏底部盲区问题已通过重新校准（靶点调整至 y=305）修复（2026-08-27）。
+
 ## 5. 关键文件清单
 
 | 文件 | 说明 |
@@ -434,10 +501,11 @@
 
 ## 6. 新会话接手建议
 
-### 6.1 UI 与触摸功能（已全部完成并通过编译）
+### 6.1 UI 与触摸功能（已全部完成并通过硬件验证）
 - **主界面**：采用 Thermometer Demo 风格圆弧仪表盘，15.0°C ~ 25.0°C 范围，当前室温整数大字，目标温度 0.5°C 精度黄色指针与读数。
 - **输入集成**：LVGL indev 注册完成，支持圆弧拖动吸附与按钮触摸，物理编码器以 ±0.5°C 步长同步调节。
-- **首次校准**：保留四点角点校准与 NVS 持久化机制。
+- **物理按键**：轻触开关（POWER/FUNC/SLEEP）与旋转编码器（EC11，PCNT 硬件正交解码）均已调试完成，调试日志已关闭。
+- **触摸校准（重要）**：保留四点角标校准与 NVS 持久化机制。校准靶点已调整至 `{20,20}/{210,20}/{30,305}/{210,305}`（靠近屏幕边缘），确保底部触摸区域 raw ADC 值在校准范围内。校准一次后重启不再触发校准流程。如需重新校准，可调用 `touch_driver_erase_calibration()` 清除 NVS 后重启。
 
 ### 6.2 硬件接线确认
 - LCD：SCK=12, MOSI=11, MISO=10, CS=2, DC=3, RESET=1, BL=0

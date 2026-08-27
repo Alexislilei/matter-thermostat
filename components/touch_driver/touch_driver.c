@@ -6,6 +6,7 @@
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 static const char *TAG = "TOUCH_DRIVER";
 
@@ -157,13 +158,21 @@ static void calibrate_point(int32_t raw_x, int32_t raw_y, int16_t *out_x, int16_
     }
 
     // 限制在屏幕范围内
-    if (sx < 0) sx = 0;
-    if (sx > TOUCH_LCD_W - 1) sx = TOUCH_LCD_W - 1;
-    if (sy < 0) sy = 0;
-    if (sy > TOUCH_LCD_H - 1) sy = TOUCH_LCD_H - 1;
+    int16_t clamped_x = sx;
+    int16_t clamped_y = sy;
+    if (clamped_x < 0) clamped_x = 0;
+    if (clamped_x > TOUCH_LCD_W - 1) clamped_x = TOUCH_LCD_W - 1;
+    if (clamped_y < 0) clamped_y = 0;
+    if (clamped_y > TOUCH_LCD_H - 1) clamped_y = TOUCH_LCD_H - 1;
 
-    *out_x = (int16_t)sx;
-    *out_y = (int16_t)sy;
+    // ESP_LOGI(TAG, "[TOUCH DETAIL] raw(%d,%d) [calib: x_min=%d, x_max=%d, y_min=%d, y_max=%d, swap=%d, invX=%d, invY=%d] -> mapped(%ld,%ld) -> clamped(%d,%d)",
+    //          (int)raw_x, (int)raw_y,
+    //          (int)s_calib.x_min, (int)s_calib.x_max, (int)s_calib.y_min, (int)s_calib.y_max,
+    //          (int)s_calib.swap_xy, (int)s_calib.invert_x, (int)s_calib.invert_y,
+    //          (long)sx, (long)sy, (int)clamped_x, (int)clamped_y);
+
+    *out_x = clamped_x;
+    *out_y = clamped_y;
 }
 
 esp_err_t touch_driver_init(const touch_config_t *cfg) {
@@ -266,10 +275,15 @@ esp_err_t touch_driver_get_point(touch_point_t *point) {
     int32_t pressure = (int32_t)z2 - (int32_t)z1;
     if (pressure < 0) pressure = -pressure;
 
+    // ESP_LOGI(TAG, "[TOUCH DEBUG] SPI read: raw_x=%u, raw_y=%u, z1=%u, z2=%u, pressure=%ld",
+    //          raw_x, raw_y, z1, z2, (long)pressure);
+
     // 压力过小或坐标无效（0 或 4095 边界）视为未按下
     if (pressure < TOUCH_PRESSURE_THRESHOLD ||
         raw_x == 0 || raw_x == 0x0FFF ||
         raw_y == 0 || raw_y == 0x0FFF) {
+        // ESP_LOGW(TAG, "[TOUCH DEBUG] Reading ignored: pressure threshold=%d (actual=%ld) or invalid coords",
+        //          TOUCH_PRESSURE_THRESHOLD, (long)pressure);
         point->touched = false;
         point->x = 0;
         point->y = 0;
@@ -379,6 +393,29 @@ esp_err_t touch_driver_save_calibration(const touch_calibration_t *calib) {
              (int)calib->swap_xy, (int)calib->invert_x, (int)calib->invert_y);
     return ESP_OK;
 }
+
+// 清除 NVS 中的触摸屏校准参数，迫使下次上电重新校准
+esp_err_t touch_driver_erase_calibration(void) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TOUCH_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open failed for erase: %d", err);
+        return err;
+    }
+
+    nvs_erase_key(handle, TOUCH_NVS_KEY_FLAG);   // 忽略删除失败错误 (可能不存在)
+    nvs_erase_key(handle, TOUCH_NVS_KEY_CALIB);
+    err = nvs_commit(handle);
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "Touch calibration erased from NVS - will re-calibrate on next boot");
+    } else {
+        ESP_LOGE(TAG, "NVS commit failed during erase: %d", err);
+    }
+    return err;
+}
+
 
 // 设置运行时校准参数（不保存到 NVS）
 void touch_driver_set_calibration(const touch_calibration_t *calib) {

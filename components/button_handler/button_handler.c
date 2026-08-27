@@ -19,6 +19,7 @@ typedef struct {
 
 static button_state_t s_btn_power;
 static button_state_t s_btn_func;
+static button_state_t s_btn_sleep;
 
 // ---- EC11 旋转编码器 PCNT 硬件正交解码 ----
 // 使用 ESP32-C6 的 PCNT (Pulse Counter) 外设在硬件层面进行标准双通道正交解码，
@@ -60,6 +61,7 @@ esp_err_t button_handler_init(button_config_t *cfg, thermostat_dev_t *thermostat
 
     init_single_btn(&s_btn_power, cfg->pin_power);
     init_single_btn(&s_btn_func, cfg->pin_func);
+    init_single_btn(&s_btn_sleep, cfg->pin_sleep);
 
     // 配置 EC11 编码器 GPIO (KEY_RA, KEY_RB) 为输入 + 内部上拉
     gpio_config_t io_conf = {
@@ -134,6 +136,20 @@ void button_handler_poll(void) {
 
     bool raw_pwr  = (gpio_get_level(s_cfg.pin_power) == 0);
     bool raw_func = (gpio_get_level(s_cfg.pin_func) == 0);
+    bool raw_sleep = (gpio_get_level(s_cfg.pin_sleep) == 0);
+
+    // static bool last_raw_pwr = false;
+    // static bool last_raw_func = false;
+    // static bool last_raw_sleep = false;
+    // static int64_t last_print_time = 0;
+    // if (raw_pwr != last_raw_pwr || raw_func != last_raw_func || raw_sleep != last_raw_sleep || (now_ms - last_print_time >= 2000)) {
+    //     ESP_LOGI(TAG, "[BUTTON DEBUG] Raw states: PWR(GPIO%d)=%d, FUNC(GPIO%d)=%d, SLEEP(GPIO%d)=%d (1=Pressed, 0=Released)", 
+    //              s_cfg.pin_power, raw_pwr, s_cfg.pin_func, raw_func, s_cfg.pin_sleep, raw_sleep);
+    //     last_raw_pwr = raw_pwr;
+    //     last_raw_func = raw_func;
+    //     last_raw_sleep = raw_sleep;
+    //     last_print_time = now_ms;
+    // }
 
     // 1. EC11 旋转编码器 PCNT 硬件正交解码
     //    读取 PCNT 计数值 (硬件层面已按方向累加，每边沿 ±1)，
@@ -238,7 +254,7 @@ void button_handler_poll(void) {
         }
     }
 
-    // 3. FUNC 按键逻辑 (GPIO18)
+    // 3. FUNC 按键逻辑 (GPIO15)
     //    待机下短按唤醒设备；开机下短按循环切换页面 (主页面 <-> Sleep Timer 设置页)
     if (raw_func) {
         if (s_btn_func.press_time_ms == 0) {
@@ -269,6 +285,38 @@ void button_handler_poll(void) {
                 }
             }
             s_btn_func.press_time_ms = 0;
+        }
+    }
+
+    // 4. SLEEP 按键逻辑 (GPIO18)
+    //    待机下短按唤醒设备；开机下短按启动/关闭 Sleep Timer (等同于点击屏上右下角的触摸按键)
+    if (raw_sleep) {
+        if (s_btn_sleep.press_time_ms == 0) {
+            s_btn_sleep.press_time_ms = now_ms;
+        }
+    } else {
+        if (s_btn_sleep.press_time_ms > 0) {
+            int64_t duration = now_ms - s_btn_sleep.press_time_ms;
+            if (duration >= 50) {
+                if (s_thermostat->mode == THERMOSTAT_MODE_STANDBY) {
+                    ESP_LOGI(TAG, "SLEEP short press -> Wake up from STANDBY");
+                    thermostat_set_mode(s_thermostat, THERMOSTAT_MODE_ON);
+                } else if (s_thermostat->mode == THERMOSTAT_MODE_ON) {
+                    // 记录操作时间，用于非主页面 60s 超时返回
+                    s_thermostat->last_input_time_ms = now_ms;
+
+                    if (s_thermostat->sleep_timer_active) {
+                        s_thermostat->sleep_timer_active = false;
+                        s_thermostat->sleep_timer_start_ms = 0;
+                        ESP_LOGI(TAG, "Physical Sleep Timer button -> OFF");
+                    } else {
+                        s_thermostat->sleep_timer_active = true;
+                        s_thermostat->sleep_timer_start_ms = now_ms;
+                        ESP_LOGI(TAG, "Physical Sleep Timer button -> %d min countdown started", s_thermostat->sleep_timer_setting);
+                    }
+                }
+            }
+            s_btn_sleep.press_time_ms = 0;
         }
     }
 }

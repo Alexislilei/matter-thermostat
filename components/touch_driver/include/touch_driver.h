@@ -115,6 +115,16 @@ bool touch_driver_load_calibration(touch_calibration_t *calib);
 esp_err_t touch_driver_save_calibration(const touch_calibration_t *calib);
 
 /**
+ * @brief 清除 NVS 中保存的触摸屏校准参数
+ *
+ * 调用后下次上电将重新执行交互式校准流程。
+ * 用于校准参数错误时强制重新校准（如触摸屏安装位置变更）。
+ *
+ * @return esp_err_t ESP_OK 表示清除成功
+ */
+esp_err_t touch_driver_erase_calibration(void);
+
+/**
  * @brief 设置运行时校准参数（不保存到 NVS）
  *
  * 用于校准过程中临时更新校准参数，或加载 NVS 参数后应用。

@@ -43,7 +43,7 @@ static const char *TAG = "LCD_DISPLAY";
 #define ARC_END_ANGLE   45
 #define ARC_SWEEP_ANGLE 270.0f
 #define DIAL_CENTER_X   120
-#define DIAL_CENTER_Y   138
+#define DIAL_CENTER_Y   148
 
 static lv_disp_t *s_disp = NULL;
 static lv_indev_t *s_indev_touch = NULL;
@@ -51,6 +51,7 @@ static thermostat_dev_t *s_dev = NULL;
 
 // ---- 主页面 UI 控件句柄 ----
 static lv_obj_t *s_main_cont = NULL;          // 主页面主容器
+static lv_obj_t *s_cont_top_bar = NULL;       // 顶部状态栏白底容器
 static lv_obj_t *s_lbl_time = NULL;           // 顶部信息栏 (日期/时间)
 static lv_obj_t *s_lbl_wifi = NULL;           // 顶部信息栏 (Wi-Fi 图标)
 
@@ -75,6 +76,7 @@ static lv_obj_t *s_lbl_timer_title = NULL;    // "SLEEP TIMER"
 static lv_obj_t *s_lbl_timer_val = NULL;      // "OFF" 或倒计时 "28:30"
 
 static lv_obj_t *s_lbl_standby = NULL;        // 待机页 STANDBY 文字
+static lv_obj_t *s_lbl_standby_temp = NULL;   // 待机页当前温度文字
 
 // ---- Sleep Timer 设置页控件 ----
 static lv_obj_t *s_lbl_sleep_title;      // 页面标题 "SLEEP TIMER SETTING"
@@ -119,6 +121,7 @@ static char s_last_time_str[32] = {0};
 // 前向声明
 static void update_target_indicator_pos(float target_temp);
 static int timer_remaining_seconds(const thermostat_dev_t *dev);
+static void ui_render(void);
 
 // 触摸输入设备读取回调 (接入 LVGL)
 static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
@@ -190,16 +193,16 @@ static void update_target_indicator_pos(float target_temp) {
     float angle_deg = (float)ARC_START_ANGLE + frac * ARC_SWEEP_ANGLE;
     float rad = angle_deg * (3.14159265f / 180.0f);
 
-    // 刻度环半径为 95px，外侧读数标签中心半径设为 114px
-    int r = 114;
+    // 刻度环半径为 84px，外侧读数标签中心半径设为 104px (留出适当间距)
+    int r = 104;
     int cx = DIAL_CENTER_X + (int)(r * cosf(rad));
     int cy = DIAL_CENTER_Y + (int)(r * sinf(rad));
 
-    // 限制在屏幕内 (X: 10~230, Y: 28~248)
+    // 限制在屏幕有效区域内 (Top bar 高度 26px，cy>=36 保证标签顶部 cy-8>=28 完全处于白底栏下方)
     if (cx < 24) cx = 24;
     if (cx > 216) cx = 216;
-    if (cy < 38) cy = 38;
-    if (cy > 242) cy = 242;
+    if (cy < 36) cy = 36;
+    if (cy > 244) cy = 244;
 
     lv_obj_align(s_lbl_target_temp_val, LV_ALIGN_TOP_LEFT, cx - 18, cy - 8);
 }
@@ -215,59 +218,71 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_radius(s_main_cont, 0, 0);
     lv_obj_set_style_pad_all(s_main_cont, 0, 0);
     lv_obj_align(s_main_cont, LV_ALIGN_TOP_LEFT, 0, 0);
+    // 禁用滚动与溢出裁剪，避免子控件（底部按钮）触摸区域被截断
+    lv_obj_clear_flag(s_main_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_clip_corner(s_main_cont, false, 0);
 
-    // 1. 顶部状态栏 (Top Bar)
+    // 1. 顶部状态栏 (Top Bar) - 白底黑字纯二维扁平设计 (挂载在屏幕根节点，主页/待机/睡眠设置页共用)
+    s_cont_top_bar = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_cont_top_bar, LCD_H_RES, 26);
+    lv_obj_set_style_bg_color(s_cont_top_bar, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_cont_top_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cont_top_bar, 0, 0);
+    lv_obj_set_style_radius(s_cont_top_bar, 0, 0);
+    lv_obj_set_style_pad_all(s_cont_top_bar, 0, 0);
+    lv_obj_align(s_cont_top_bar, LV_ALIGN_TOP_MID, 0, 0);
+
     // 左侧：日期与时间 (Fri, Mar 11  19:45)
-    s_lbl_time = lv_label_create(s_main_cont);
+    s_lbl_time = lv_label_create(s_cont_top_bar);
     lv_obj_set_style_text_font(s_lbl_time, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_lbl_time, lv_color_hex(0xE2E8F0), 0);
-    lv_obj_align(s_lbl_time, LV_ALIGN_TOP_LEFT, 10, 6);
+    lv_obj_set_style_text_color(s_lbl_time, lv_color_black(), 0);
+    lv_obj_align(s_lbl_time, LV_ALIGN_LEFT_MID, 8, 0);
 
     // 右侧：Wi-Fi 状态图标
-    s_lbl_wifi = lv_label_create(s_main_cont);
+    s_lbl_wifi = lv_label_create(s_cont_top_bar);
     lv_obj_set_style_text_font(s_lbl_wifi, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_lbl_wifi, lv_color_hex(0xE2E8F0), 0);
-    lv_obj_align(s_lbl_wifi, LV_ALIGN_TOP_RIGHT, -10, 6);
+    lv_obj_set_style_text_color(s_lbl_wifi, lv_color_black(), 0);
+    lv_obj_align(s_lbl_wifi, LV_ALIGN_RIGHT_MID, -8, 0);
 
-    // 2. 中央圆环温度区 (X: 120, Y: 138, R=95)
-    // 2.1 刻度固定圆点 (5 个分度点: 15.0°, 17.5°, 20.0°, 22.5°, 25.0°)
+    // 2. 中央圆环温度区 (X: 120, Y: 148, R=84)
+    // 2.1 刻度固定圆点 (5 个分度点: 15.0°, 17.5°, 20.0°, 22.5°, 25.0°) - 纯二维扁平方点，无圆角彩虹边缘
     static const float dot_temps[5] = {15.0f, 17.5f, 20.0f, 22.5f, 25.0f};
     for (int i = 0; i < 5; i++) {
         float frac = (dot_temps[i] - TEMP_MIN) / (TEMP_MAX - TEMP_MIN);
         float deg = (float)ARC_START_ANGLE + frac * ARC_SWEEP_ANGLE;
         float rad = deg * (3.14159265f / 180.0f);
-        int dot_r = 95;
+        int dot_r = 84;
         int dx = DIAL_CENTER_X + (int)(dot_r * cosf(rad));
         int dy = DIAL_CENTER_Y + (int)(dot_r * sinf(rad));
 
         s_scale_dots[i] = lv_obj_create(s_main_cont);
-        lv_obj_set_size(s_scale_dots[i], 6, 6);
+        lv_obj_set_size(s_scale_dots[i], 5, 5);
         lv_obj_set_style_bg_color(s_scale_dots[i], (i == 0 || i == 4) ? lv_color_hex(0x94A3B8) : lv_color_hex(0x475569), 0);
         lv_obj_set_style_bg_opa(s_scale_dots[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(s_scale_dots[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_radius(s_scale_dots[i], 0, 0);
         lv_obj_set_style_border_width(s_scale_dots[i], 0, 0);
         lv_obj_set_style_pad_all(s_scale_dots[i], 0, 0);
-        lv_obj_align(s_scale_dots[i], LV_ALIGN_TOP_LEFT, dx - 3, dy - 3);
+        lv_obj_align(s_scale_dots[i], LV_ALIGN_TOP_LEFT, dx - 2, dy - 2);
         lv_obj_clear_flag(s_scale_dots[i], LV_OBJ_FLAG_CLICKABLE);
     }
 
     // 2.2 极值标注 ("15°" 和 "25°")
     s_lbl_scale_min = lv_label_create(s_main_cont);
     lv_obj_set_style_text_font(s_lbl_scale_min, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_lbl_scale_min, lv_color_hex(0x94A3B8), 0);
+    lv_obj_set_style_text_color(s_lbl_scale_min, lv_color_white(), 0);
     lv_label_set_text(s_lbl_scale_min, "15°");
-    lv_obj_align(s_lbl_scale_min, LV_ALIGN_TOP_LEFT, 30, 218);
+    lv_obj_align(s_lbl_scale_min, LV_ALIGN_TOP_LEFT, 36, 216);
 
     s_lbl_scale_max = lv_label_create(s_main_cont);
     lv_obj_set_style_text_font(s_lbl_scale_max, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_lbl_scale_max, lv_color_hex(0x94A3B8), 0);
+    lv_obj_set_style_text_color(s_lbl_scale_max, lv_color_white(), 0);
     lv_label_set_text(s_lbl_scale_max, "25°");
-    lv_obj_align(s_lbl_scale_max, LV_ALIGN_TOP_LEFT, 185, 218);
+    lv_obj_align(s_lbl_scale_max, LV_ALIGN_TOP_LEFT, 178, 216);
 
     // 2.3 当前温度蓝色圆弧 (不可拖动，只作显示)
     s_arc_current = lv_arc_create(s_main_cont);
-    lv_obj_set_size(s_arc_current, 190, 190);
-    lv_obj_align(s_arc_current, LV_ALIGN_CENTER, 0, -22);
+    lv_obj_set_size(s_arc_current, 168, 168);
+    lv_obj_align(s_arc_current, LV_ALIGN_CENTER, 0, -12);
     lv_arc_set_rotation(s_arc_current, 0);
     lv_arc_set_bg_angles(s_arc_current, ARC_START_ANGLE, ARC_END_ANGLE);
     lv_arc_set_angles(s_arc_current, ARC_START_ANGLE, ARC_START_ANGLE);
@@ -291,8 +306,8 @@ static void ui_create_main_page(void) {
     // 2.4 目标温度黄色调节圆弧 (可触摸拖动，吸附 0.5°C)
     // 范围 30 ~ 50 (对应 15.0 ~ 25.0, 步长 1 = 0.5°C)
     s_arc_target = lv_arc_create(s_main_cont);
-    lv_obj_set_size(s_arc_target, 190, 190);
-    lv_obj_align(s_arc_target, LV_ALIGN_CENTER, 0, -22);
+    lv_obj_set_size(s_arc_target, 168, 168);
+    lv_obj_align(s_arc_target, LV_ALIGN_CENTER, 0, -12);
     lv_arc_set_rotation(s_arc_target, 0);
     lv_arc_set_bg_angles(s_arc_target, ARC_START_ANGLE, ARC_END_ANGLE);
     lv_arc_set_range(s_arc_target, 30, 50);
@@ -321,7 +336,7 @@ static void ui_create_main_page(void) {
     // 2.6 中央深色表盘圆盘 (同心圆)
     s_obj_inner_dial = lv_obj_create(s_main_cont);
     lv_obj_set_size(s_obj_inner_dial, 126, 126);
-    lv_obj_align(s_obj_inner_dial, LV_ALIGN_CENTER, 0, -22);
+    lv_obj_align(s_obj_inner_dial, LV_ALIGN_CENTER, 0, -12);
     lv_obj_set_style_bg_color(s_obj_inner_dial, lv_color_hex(0x111722), 0);
     lv_obj_set_style_bg_opa(s_obj_inner_dial, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(s_obj_inner_dial, lv_color_hex(0x1E293B), 0);
@@ -337,65 +352,79 @@ static void ui_create_main_page(void) {
     lv_label_set_text(s_lbl_current_temp, "20°");
     lv_obj_align(s_lbl_current_temp, LV_ALIGN_CENTER, 0, -6);
 
-    // 2.8 "ROOM" 标签
+    // 2.8 "ROOM" 标签 (纯白色，加粗/增大至 16 号字，提升对比度与清晰度)
     s_lbl_current_title = lv_label_create(s_obj_inner_dial);
-    lv_obj_set_style_text_font(s_lbl_current_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_current_title, lv_color_hex(0x64748B), 0);
+    lv_obj_set_style_text_font(s_lbl_current_title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_current_title, lv_color_hex(0xFFFFFF), 0);
     lv_label_set_text(s_lbl_current_title, "ROOM");
     lv_obj_align(s_lbl_current_title, LV_ALIGN_CENTER, 0, 26);
 
-    // 3. 底部状态与操作栏 (Bottom Area)
+    // 3. 底部状态与操作栏 (Bottom Area) - 纯二维直角设计，彻底消除倒角线彩虹纹
     // 3.1 左侧：加热状态卡片 (HEAT / OFF)
     s_btn_heat = lv_btn_create(s_main_cont);
-    lv_obj_set_size(s_btn_heat, 104, 56);
-    lv_obj_align(s_btn_heat, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_size(s_btn_heat, 108, 62);
+    lv_obj_align(s_btn_heat, LV_ALIGN_BOTTOM_LEFT, 8, -12);  // 上移避开触摸校准底部盲区
     lv_obj_set_style_bg_color(s_btn_heat, lv_color_hex(0x131A26), 0);
-    lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0x243044), 0);
-    lv_obj_set_style_border_width(s_btn_heat, 1, 0);
-    lv_obj_set_style_radius(s_btn_heat, 8, 0);
+    lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_border_width(s_btn_heat, 2, 0);
+    lv_obj_set_style_radius(s_btn_heat, 0, 0); // 直角无倒角抗锯齿彩虹
     lv_obj_set_style_pad_all(s_btn_heat, 4, 0);
     lv_obj_add_event_cb(s_btn_heat, btn_heat_click_cb, LV_EVENT_CLICKED, NULL);
 
     s_lbl_heat_title = lv_label_create(s_btn_heat);
-    lv_obj_set_style_text_font(s_lbl_heat_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_heat_title, lv_color_hex(0x94A3B8), 0);
+    lv_obj_set_style_text_font(s_lbl_heat_title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_heat_title, lv_color_white(), 0);
     lv_label_set_text(s_lbl_heat_title, "HEATER");
     lv_obj_align(s_lbl_heat_title, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_clear_flag(s_lbl_heat_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lbl_heat_title, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     s_lbl_heat_status = lv_label_create(s_btn_heat);
     lv_obj_set_style_text_font(s_lbl_heat_status, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_lbl_heat_status, lv_color_hex(0x94A3B8), 0);
     lv_label_set_text(s_lbl_heat_status, "OFF");
     lv_obj_align(s_lbl_heat_status, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_clear_flag(s_lbl_heat_status, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lbl_heat_status, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     // 3.2 右侧：Sleep Timer 卡片/按钮
     s_btn_timer = lv_btn_create(s_main_cont);
-    lv_obj_set_size(s_btn_timer, 104, 56);
-    lv_obj_align(s_btn_timer, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_size(s_btn_timer, 108, 62);
+    lv_obj_align(s_btn_timer, LV_ALIGN_BOTTOM_RIGHT, -8, -12);  // 上移避开触摸校准底部盲区
     lv_obj_set_style_bg_color(s_btn_timer, lv_color_hex(0x131A26), 0);
-    lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x243044), 0);
-    lv_obj_set_style_border_width(s_btn_timer, 1, 0);
-    lv_obj_set_style_radius(s_btn_timer, 8, 0);
+    lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_border_width(s_btn_timer, 2, 0);
+    lv_obj_set_style_radius(s_btn_timer, 0, 0); // 直角无倒角抗锯齿彩虹
     lv_obj_set_style_pad_all(s_btn_timer, 4, 0);
     lv_obj_add_event_cb(s_btn_timer, btn_timer_click_cb, LV_EVENT_CLICKED, NULL);
 
     s_lbl_timer_title = lv_label_create(s_btn_timer);
-    lv_obj_set_style_text_font(s_lbl_timer_title, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_lbl_timer_title, lv_color_hex(0x94A3B8), 0);
+    lv_obj_set_style_text_font(s_lbl_timer_title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_timer_title, lv_color_white(), 0);
     lv_label_set_text(s_lbl_timer_title, "SLEEP TIMER");
     lv_obj_align(s_lbl_timer_title, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_clear_flag(s_lbl_timer_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lbl_timer_title, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     s_lbl_timer_val = lv_label_create(s_btn_timer);
     lv_obj_set_style_text_font(s_lbl_timer_val, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_lbl_timer_val, lv_color_hex(0xE2E8F0), 0);
     lv_label_set_text(s_lbl_timer_val, "OFF");
     lv_obj_align(s_lbl_timer_val, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_clear_flag(s_lbl_timer_val, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lbl_timer_val, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    // 4. 待机页 STANDBY 文字
+    // 4. 待机页控件
+    s_lbl_standby_temp = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_font(s_lbl_standby_temp, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(s_lbl_standby_temp, lv_color_white(), 0);
+    lv_obj_align(s_lbl_standby_temp, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
+
     s_lbl_standby = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_font(s_lbl_standby, &lv_font_montserrat_32, 0);
     lv_obj_set_style_text_color(s_lbl_standby, lv_color_white(), 0);
-    lv_obj_align(s_lbl_standby, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_align(s_lbl_standby, LV_ALIGN_CENTER, 0, 45);
     lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -465,10 +494,10 @@ static void ui_create_calib_page(void) {
 
 static void ui_update_calib_page(void) {
     static const lv_coord_t target_pos[4][2] = {
-        { 30,  30 },   // TL
-        { 210, 30 },   // TR
-        { 30,  290 },  // BL
-        { 210, 290 },  // BR
+        { 30,  20 },   // TL (靠近顶部边缘)
+        { 210, 20 },   // TR (靠近顶部边缘)
+        { 30,  305 },  // BL (靠近底部边缘，覆盖按钮下半部分)
+        { 210, 305 },  // BR (靠近底部边缘，覆盖按钮下半部分)
     };
     static const char *hint_text[4] = {
         "Touch TOP-LEFT corner",
@@ -491,7 +520,9 @@ static void ui_update_calib_page(void) {
 }
 
 static void ui_calib_hide_all_normal(void) {
+    if (s_cont_top_bar) lv_obj_add_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
     if (s_main_cont) lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
+    if (s_lbl_standby_temp) lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
     if (s_lbl_standby) lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
     if (s_lbl_sleep_title) lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
     for (int i = 0; i < 4; i++) {
@@ -500,7 +531,7 @@ static void ui_calib_hide_all_normal(void) {
 }
 
 static void ui_calib_restore_all_normal(void) {
-    if (s_main_cont) lv_obj_clear_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
+    ui_render();
 }
 
 void lcd_display_calib_show(void) {
@@ -652,7 +683,7 @@ static void ui_update_main_page(void) {
     } else {
         lv_label_set_text(s_lbl_heat_status, "OFF");
         lv_obj_set_style_text_color(s_lbl_heat_status, lv_color_hex(0x94A3B8), 0);
-        lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0x243044), 0);
+        lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0x334155), 0);
     }
 
     // 6. Sleep Timer 卡片
@@ -672,7 +703,7 @@ static void ui_update_main_page(void) {
         snprintf(buf, sizeof(buf), "OFF");
         lv_label_set_text(s_lbl_timer_val, buf);
         lv_obj_set_style_text_color(s_lbl_timer_val, lv_color_hex(0x94A3B8), 0);
-        lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x243044), 0);
+        lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x334155), 0);
     }
 }
 
@@ -686,7 +717,7 @@ static void ui_update_standby_page(void) {
 
     int cur_int = (int)roundf(s_dev->current_temp);
     snprintf(buf, sizeof(buf), "%d°", cur_int);
-    lv_label_set_text(s_lbl_current_temp, buf);
+    lv_label_set_text(s_lbl_standby_temp, buf);
 
     lv_label_set_text(s_lbl_standby, "STANDBY");
 }
@@ -701,6 +732,8 @@ static void ui_render(void) {
 
     // 待机模式
     if (s_dev->mode == THERMOSTAT_MODE_STANDBY) {
+        lv_obj_clear_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
@@ -713,6 +746,8 @@ static void ui_render(void) {
 
     // Sleep Timer 设置页
     if (s_dev->current_page == UI_PAGE_SLEEP_TIMER) {
+        lv_obj_clear_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
@@ -724,6 +759,8 @@ static void ui_render(void) {
     }
 
     // 开机主页面
+    lv_obj_clear_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
