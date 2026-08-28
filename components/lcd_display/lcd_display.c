@@ -62,7 +62,9 @@ static lv_obj_t *s_lbl_scale_min = NULL;      // "15°" 极值标注
 static lv_obj_t *s_lbl_scale_max = NULL;      // "25°" 极值标注
 
 static lv_obj_t *s_obj_inner_dial = NULL;     // 中央深色表盘圆盘
-static lv_obj_t *s_lbl_current_temp = NULL;   // 中央当前温度大字 (整数, 如 23°)
+static lv_obj_t *s_cont_temp = NULL;          // 中央当前温度容器 (整数+小数)
+static lv_obj_t *s_lbl_current_temp = NULL;   // 中央当前温度整数部分 (48 号字, 如 23)
+static lv_obj_t *s_lbl_current_temp_dec = NULL;// 中央当前温度小数部分 (24 号字, 如 .5)
 static lv_obj_t *s_lbl_current_title = NULL;  // "ROOM" 标签
 
 static lv_obj_t *s_lbl_target_temp_val = NULL;// 黄色刻度线外侧目标温度读数 (如 22.5°)
@@ -76,7 +78,8 @@ static lv_obj_t *s_lbl_timer_title = NULL;    // "SLEEP TIMER"
 static lv_obj_t *s_lbl_timer_val = NULL;      // "OFF" 或倒计时 "28:30"
 
 static lv_obj_t *s_lbl_standby = NULL;        // 待机页 STANDBY 文字
-static lv_obj_t *s_lbl_standby_temp = NULL;   // 待机页当前温度文字
+static lv_obj_t *s_lbl_standby_temp = NULL;   // 待机页当前温度整数部分文字
+static lv_obj_t *s_lbl_standby_temp_dec = NULL;// 待机页当前温度小数部分文字
 
 // ---- Sleep Timer 设置页控件 ----
 static lv_obj_t *s_lbl_sleep_title;      // 页面标题 "SLEEP TIMER SETTING"
@@ -345,19 +348,37 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_pad_all(s_obj_inner_dial, 0, 0);
     lv_obj_clear_flag(s_obj_inner_dial, LV_OBJ_FLAG_CLICKABLE);
 
-    // 2.7 中央当前温度大字 (整数，如 23°)
-    s_lbl_current_temp = lv_label_create(s_obj_inner_dial);
+    // 2.7 中央当前温度 (整数部分 48 号字 + 小数部分 24 号字，共 3 位有效数字，如 23.5)
+    // 因增加小数显示宽度，整体下移以在表盘内获得更宽的显示位置
+    s_cont_temp = lv_obj_create(s_obj_inner_dial);
+    lv_obj_set_size(s_cont_temp, 92, 48);
+    lv_obj_set_style_bg_opa(s_cont_temp, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_cont_temp, 0, 0);
+    lv_obj_set_style_pad_all(s_cont_temp, 0, 0);
+    lv_obj_align(s_cont_temp, LV_ALIGN_CENTER, 0, 4);
+    lv_obj_clear_flag(s_cont_temp, LV_OBJ_FLAG_CLICKABLE);
+
+    // 整数部分 (如 23)
+    s_lbl_current_temp = lv_label_create(s_cont_temp);
     lv_obj_set_style_text_font(s_lbl_current_temp, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(s_lbl_current_temp, lv_color_hex(0xFFFFFF), 0);
-    lv_label_set_text(s_lbl_current_temp, "20°");
-    lv_obj_align(s_lbl_current_temp, LV_ALIGN_CENTER, 0, -6);
+    lv_label_set_text(s_lbl_current_temp, "23");
+    lv_obj_align(s_lbl_current_temp, LV_ALIGN_LEFT_MID, 0, 0);
+
+    // 小数部分 (如 .5)，字号为整数部分的一半 (24 号字)，底部对齐以保持基线一致
+    s_lbl_current_temp_dec = lv_label_create(s_cont_temp);
+    lv_obj_set_style_text_font(s_lbl_current_temp_dec, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_lbl_current_temp_dec, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(s_lbl_current_temp_dec, ".5");
+    lv_obj_align(s_lbl_current_temp_dec, LV_ALIGN_BOTTOM_LEFT, 56, 0);
 
     // 2.8 "ROOM" 标签 (纯白色，加粗/增大至 16 号字，提升对比度与清晰度)
+    // 随温度整体下移，保持与温度之间的相对间距
     s_lbl_current_title = lv_label_create(s_obj_inner_dial);
     lv_obj_set_style_text_font(s_lbl_current_title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_lbl_current_title, lv_color_hex(0xFFFFFF), 0);
     lv_label_set_text(s_lbl_current_title, "ROOM");
-    lv_obj_align(s_lbl_current_title, LV_ALIGN_CENTER, 0, 26);
+    lv_obj_align(s_lbl_current_title, LV_ALIGN_CENTER, 0, 34);
 
     // 3. 底部状态与操作栏 (Bottom Area) - 纯二维直角设计，彻底消除倒角线彩虹纹
     // 3.1 左侧：加热状态卡片 (HEAT / OFF)
@@ -415,11 +436,19 @@ static void ui_create_main_page(void) {
     lv_obj_add_flag(s_lbl_timer_val, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     // 4. 待机页控件
+    // 待机页当前温度整数部分 (48 号字)
     s_lbl_standby_temp = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_font(s_lbl_standby_temp, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(s_lbl_standby_temp, lv_color_white(), 0);
-    lv_obj_align(s_lbl_standby_temp, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_align(s_lbl_standby_temp, LV_ALIGN_CENTER, -14, -20);
     lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
+
+    // 待机页当前温度小数部分 (24 号字，字号为整数部分的一半)
+    s_lbl_standby_temp_dec = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_font(s_lbl_standby_temp_dec, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_lbl_standby_temp_dec, lv_color_white(), 0);
+    lv_obj_align(s_lbl_standby_temp_dec, LV_ALIGN_CENTER, 20, -8);
+    lv_obj_add_flag(s_lbl_standby_temp_dec, LV_OBJ_FLAG_HIDDEN);
 
     s_lbl_standby = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_font(s_lbl_standby, &lv_font_montserrat_32, 0);
@@ -523,6 +552,7 @@ static void ui_calib_hide_all_normal(void) {
     if (s_cont_top_bar) lv_obj_add_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
     if (s_main_cont) lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
     if (s_lbl_standby_temp) lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
+    if (s_lbl_standby_temp_dec) lv_obj_add_flag(s_lbl_standby_temp_dec, LV_OBJ_FLAG_HIDDEN);
     if (s_lbl_standby) lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
     if (s_lbl_sleep_title) lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
     for (int i = 0; i < 4; i++) {
@@ -654,10 +684,14 @@ static void ui_update_main_page(void) {
     lv_label_set_text(s_lbl_time, buf);
     ui_update_wifi_symbol();
 
-    // 2. 中央当前温度 (整数, 如 23°)
-    int cur_int = (int)roundf(s_dev->current_temp);
-    snprintf(buf, sizeof(buf), "%d°", cur_int);
+    // 2. 中央当前温度 (3 位有效数字，整数部分 48 号字 + 小数部分 24 号字，如 23.5)
+    int cur_int = (int)floorf(s_dev->current_temp);
+    int cur_dec = (int)roundf((s_dev->current_temp - cur_int) * 10.0f);
+    if (cur_dec >= 10) { cur_dec = 0; cur_int += 1; }
+    snprintf(buf, sizeof(buf), "%d", cur_int);
     lv_label_set_text(s_lbl_current_temp, buf);
+    snprintf(buf, sizeof(buf), ".%d", cur_dec);
+    lv_label_set_text(s_lbl_current_temp_dec, buf);
 
     // 3. 当前温度蓝色圆弧进度更新 (15.0 ~ 25.0)
     int arc_val = (int)(s_dev->current_temp * 10.0f);
@@ -715,9 +749,13 @@ static void ui_update_standby_page(void) {
     lv_label_set_text(s_lbl_time, buf);
     ui_update_wifi_symbol();
 
-    int cur_int = (int)roundf(s_dev->current_temp);
-    snprintf(buf, sizeof(buf), "%d°", cur_int);
+    int cur_int = (int)floorf(s_dev->current_temp);
+    int cur_dec = (int)roundf((s_dev->current_temp - cur_int) * 10.0f);
+    if (cur_dec >= 10) { cur_dec = 0; cur_int += 1; }
+    snprintf(buf, sizeof(buf), "%d", cur_int);
     lv_label_set_text(s_lbl_standby_temp, buf);
+    snprintf(buf, sizeof(buf), ".%d", cur_dec);
+    lv_label_set_text(s_lbl_standby_temp_dec, buf);
 
     lv_label_set_text(s_lbl_standby, "STANDBY");
 }
@@ -734,6 +772,7 @@ static void ui_render(void) {
     if (s_dev->mode == THERMOSTAT_MODE_STANDBY) {
         lv_obj_clear_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_lbl_standby_temp_dec, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
@@ -748,6 +787,7 @@ static void ui_render(void) {
     if (s_dev->current_page == UI_PAGE_SLEEP_TIMER) {
         lv_obj_clear_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_standby_temp_dec, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
@@ -761,6 +801,7 @@ static void ui_render(void) {
     // 开机主页面
     lv_obj_clear_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_standby_temp_dec, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);

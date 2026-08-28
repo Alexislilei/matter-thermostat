@@ -442,7 +442,7 @@ static void temp_control_task(void *pvParameters) {
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
 }
 
