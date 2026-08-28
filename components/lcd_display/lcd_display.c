@@ -193,8 +193,8 @@ static void update_target_indicator_pos(float target_temp) {
     float angle_deg = (float)ARC_START_ANGLE + frac * ARC_SWEEP_ANGLE;
     float rad = angle_deg * (3.14159265f / 180.0f);
 
-    // 刻度环半径为 84px，外侧读数标签中心半径设为 104px (留出适当间距)
-    int r = 104;
+    // 刻度环半径为 76px，外侧读数标签中心半径设为 96px (留出适当间距)
+    int r = 96;
     int cx = DIAL_CENTER_X + (int)(r * cosf(rad));
     int cy = DIAL_CENTER_Y + (int)(r * sinf(rad));
 
@@ -251,7 +251,7 @@ static void ui_create_main_page(void) {
         float frac = (dot_temps[i] - TEMP_MIN) / (TEMP_MAX - TEMP_MIN);
         float deg = (float)ARC_START_ANGLE + frac * ARC_SWEEP_ANGLE;
         float rad = deg * (3.14159265f / 180.0f);
-        int dot_r = 84;
+        int dot_r = 76;
         int dx = DIAL_CENTER_X + (int)(dot_r * cosf(rad));
         int dy = DIAL_CENTER_Y + (int)(dot_r * sinf(rad));
 
@@ -268,20 +268,20 @@ static void ui_create_main_page(void) {
 
     // 2.2 极值标注 ("15°" 和 "25°")
     s_lbl_scale_min = lv_label_create(s_main_cont);
-    lv_obj_set_style_text_font(s_lbl_scale_min, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_lbl_scale_min, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_lbl_scale_min, lv_color_white(), 0);
     lv_label_set_text(s_lbl_scale_min, "15°");
-    lv_obj_align(s_lbl_scale_min, LV_ALIGN_TOP_LEFT, 36, 216);
+    lv_obj_align(s_lbl_scale_min, LV_ALIGN_TOP_LEFT, 34, 208);
 
     s_lbl_scale_max = lv_label_create(s_main_cont);
-    lv_obj_set_style_text_font(s_lbl_scale_max, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_lbl_scale_max, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_lbl_scale_max, lv_color_white(), 0);
     lv_label_set_text(s_lbl_scale_max, "25°");
-    lv_obj_align(s_lbl_scale_max, LV_ALIGN_TOP_LEFT, 178, 216);
+    lv_obj_align(s_lbl_scale_max, LV_ALIGN_TOP_LEFT, 180, 208);
 
     // 2.3 当前温度蓝色圆弧 (不可拖动，只作显示)
     s_arc_current = lv_arc_create(s_main_cont);
-    lv_obj_set_size(s_arc_current, 168, 168);
+    lv_obj_set_size(s_arc_current, 152, 152);
     lv_obj_align(s_arc_current, LV_ALIGN_CENTER, 0, -12);
     lv_arc_set_rotation(s_arc_current, 0);
     lv_arc_set_bg_angles(s_arc_current, ARC_START_ANGLE, ARC_END_ANGLE);
@@ -306,7 +306,7 @@ static void ui_create_main_page(void) {
     // 2.4 目标温度黄色调节圆弧 (可触摸拖动，吸附 0.5°C)
     // 范围 30 ~ 50 (对应 15.0 ~ 25.0, 步长 1 = 0.5°C)
     s_arc_target = lv_arc_create(s_main_cont);
-    lv_obj_set_size(s_arc_target, 168, 168);
+    lv_obj_set_size(s_arc_target, 152, 152);
     lv_obj_align(s_arc_target, LV_ALIGN_CENTER, 0, -12);
     lv_arc_set_rotation(s_arc_target, 0);
     lv_arc_set_bg_angles(s_arc_target, ARC_START_ANGLE, ARC_END_ANGLE);
@@ -328,14 +328,14 @@ static void ui_create_main_page(void) {
 
     // 2.5 黄色刻度线外侧目标温度数值标签 (如 22.5°)
     s_lbl_target_temp_val = lv_label_create(s_main_cont);
-    lv_obj_set_style_text_font(s_lbl_target_temp_val, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(s_lbl_target_temp_val, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_lbl_target_temp_val, lv_color_hex(0xFFD700), 0);
     lv_label_set_text(s_lbl_target_temp_val, "20.0°");
     lv_obj_clear_flag(s_lbl_target_temp_val, LV_OBJ_FLAG_CLICKABLE);
 
     // 2.6 中央深色表盘圆盘 (同心圆)
     s_obj_inner_dial = lv_obj_create(s_main_cont);
-    lv_obj_set_size(s_obj_inner_dial, 126, 126);
+    lv_obj_set_size(s_obj_inner_dial, 114, 114);
     lv_obj_align(s_obj_inner_dial, LV_ALIGN_CENTER, 0, -12);
     lv_obj_set_style_bg_color(s_obj_inner_dial, lv_color_hex(0x111722), 0);
     lv_obj_set_style_bg_opa(s_obj_inner_dial, LV_OPA_COVER, 0);
@@ -840,6 +840,11 @@ esp_err_t lcd_display_init(thermostat_dev_t *dev) {
         ESP_LOGE(TAG, "LVGL display port add failed");
         return ESP_FAIL;
     }
+
+    // 关闭抗锯齿 (anti-aliasing)：本屏幕为 240x320 低分辨率 RGB565，
+    // 抗锯齿会产生灰蒙蒙/断断续续的模糊边缘，反而让文字与圆环显得坑洼不平。
+    // 关闭后文字与图形边缘更锐利清晰。
+    s_disp->driver->antialiasing = 0;
 
     // ---- 6. 注册 LVGL 触摸输入设备 ----
     static lv_indev_drv_t indev_drv;

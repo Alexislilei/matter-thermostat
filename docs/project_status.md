@@ -450,6 +450,27 @@ sy = (337 - 345) × 319 / (1815 - 345) = -8 × 319 / 1470 ≈ -1.7
 
 ---
 
+### 3.24 主界面文字与图形边缘平滑优化 + 圆环缩小 + 字号放大（已完成）
+**现象**：主界面文字与图形边缘不平滑，圆形边缘坑洼、小字号文字（如 "9"）线条断断续续，疑似存在勾边/阴影等高级渲染效果。
+
+**根因**：LVGL 8.4 默认开启**抗锯齿（anti-aliasing）**（`lv_disp_drv_t.antialiasing` 在颜色深度 > 8 时默认置 1）。在 240x320 低分辨率 RGB565 屏幕上，抗锯齿会在文字/图形边缘产生灰蒙蒙的过渡像素，反而让边缘显得模糊、坑洼、断断续续，而非平滑。
+
+**修复**（[`components/lcd_display/lcd_display.c`](components/lcd_display/lcd_display.c)）：
+1. **关闭抗锯齿**：在 [`lcd_display_init()`](components/lcd_display/lcd_display.c:847) 中 `lvgl_port_add_disp()` 成功后设置 `s_disp->driver->antialiasing = 0`，使文字与图形边缘锐利清晰，去除模糊/勾边效果。
+2. **缩小两个同心圆半径约 10%**：
+   - 外侧温度圆弧（`s_arc_current` / `s_arc_target`）：168×168（半径 84）→ **152×152**（半径 76）。
+   - 中央深色表盘（`s_obj_inner_dial`）：126×126（半径 63）→ **114×114**（半径 57）。
+   - 外圈 5 个刻度圆点半径：84 → **76**（跟随外圆内移）。
+   - 目标温度读数标签中心半径：104 → **96**（按比例内移）。
+   - 底部 `15°` / `25°` 极值标注位置：y=216 → **y=208**（跟随缩小后的圆环上移）。
+3. **放大外圈刻度文字与设定温度文字字号**（16 → 20，大一号）：
+   - 外圈极值标注 `15°` / `25°`（`s_lbl_scale_min` / `s_lbl_scale_max`）：`lv_font_montserrat_16` → `lv_font_montserrat_20`。
+   - 黄色刻度线外侧目标温度读数（`s_lbl_target_temp_val`，如 `22.5°`）：`lv_font_montserrat_16` → `lv_font_montserrat_20`。
+
+**验证**：`idf.py build` 编译通过，生成 `build/matter-thermostat.bin`。
+
+---
+
 ### 3.22 LVGL 240x320 竖屏温控器主界面 UI 重构与开发（已完成）
 根据需求更新，参考官方 Thermometer Demo 风格对 240x320 竖屏主界面进行重构与开发：
 
