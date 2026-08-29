@@ -38,6 +38,11 @@ static pcnt_channel_handle_t s_pcnt_chan1 = NULL;
 // 避免快速旋转时因整数除法截断而漏掉卡点。
 static int s_enc_remainder = 0;
 
+// 温度偏移页 1 秒无操作自动保存标志。
+// 当用户在温度偏移页旋转编码器后置为 false，1 秒无操作保存后置为 true，
+// 避免每次轮询都重复保存到 NVS。
+static bool s_temp_offset_saved = true;
+
 static void init_single_btn(button_state_t *btn, gpio_num_t pin) {
     btn->pin = pin;
     btn->press_time_ms = 0;
@@ -134,6 +139,19 @@ void button_handler_poll(void) {
         }
     }
 
+    // 温度偏移页 1 秒无操作：自动保存偏移量到 NVS (改动后记忆)
+    // 需求：在温度偏移设置页旋转编码器调整偏移后，若 1 秒内无进一步操作，
+    //       自动将当前偏移量保存到 NVS，避免断电丢失。
+    if (s_thermostat->mode == THERMOSTAT_MODE_ON &&
+        s_thermostat->current_page == UI_PAGE_TEMP_OFFSET &&
+        !s_temp_offset_saved &&
+        s_thermostat->last_input_time_ms > 0) {
+        if (now_ms - s_thermostat->last_input_time_ms >= 1000) {
+            thermostat_temp_offset_save(s_thermostat);
+            s_temp_offset_saved = true;
+        }
+    }
+
     bool raw_pwr  = (gpio_get_level(s_cfg.pin_power) == 0);
     bool raw_func = (gpio_get_level(s_cfg.pin_func) == 0);
     bool raw_sleep = (gpio_get_level(s_cfg.pin_sleep) == 0);
@@ -205,6 +223,22 @@ void button_handler_poll(void) {
                     // 改动后记忆：保存到 NVS，下次上电读取
                     thermostat_sleep_timer_save(s_thermostat);
                 }
+            } else if (s_thermostat->current_page == UI_PAGE_TEMP_OFFSET) {
+                // 温度偏移 (Temp Offset) 设置页面：调整温度偏移量
+                // 需求：顺时针旋转一格 +0.5 ℃，逆时针旋转一格 -0.5 ℃，
+                //      范围锁在 [-2.0, +2.0] ℃。
+                float delta = (float)encoder_direction * 0.5f; // 正=加, 负=减
+                float new_offset = s_thermostat->temp_offset + delta;
+                if (new_offset < -2.0f) new_offset = -2.0f;
+                if (new_offset >  2.0f) new_offset =  2.0f;
+
+                if (new_offset != s_thermostat->temp_offset) {
+                    s_thermostat->temp_offset = new_offset;
+                    // 有新的调整，重置 1 秒自动保存标志
+                    s_temp_offset_saved = false;
+                    ESP_LOGI(TAG, "Temp Offset adjusted to: %+.1f C",
+                             s_thermostat->temp_offset);
+                }
             } else {
                 // 主页面：调整目标温度 (encoder_direction 绝对值 = 卡点数)
                 // 每卡点改变 0.5℃ (需求变更: 由 1.0℃ 改为 0.5℃)
@@ -271,16 +305,22 @@ void button_handler_poll(void) {
                     // 记录操作时间，用于非主页面 60s 超时返回
                     s_thermostat->last_input_time_ms = now_ms;
 
+                    // 页面循环：主页面 -> Sleep Timer 设置页 -> 温度偏移设置页 -> 主页面
+                    // 离开温度偏移页时保存偏移量到 NVS (改动后记忆)。
                     if (s_thermostat->current_page == UI_PAGE_MAIN) {
                         // 主页面 -> Sleep Timer 设置页
                         s_thermostat->current_page = UI_PAGE_SLEEP_TIMER;
                         ESP_LOGI(TAG, "FUNC press -> Enter SLEEP TIMER SETTING page");
+                    } else if (s_thermostat->current_page == UI_PAGE_SLEEP_TIMER) {
+                        // Sleep Timer 设置页 -> 温度偏移设置页
+                        s_thermostat->current_page = UI_PAGE_TEMP_OFFSET;
+                        ESP_LOGI(TAG, "FUNC press -> Enter TEMP OFFSET SETTING page");
                     } else {
-                        // Sleep Timer 设置页 -> 主页面
-                        // 注意：FUNC 按键仅负责页面切换，不在此处启动倒计时。
-                        // 触发 sleeper 启动的只有屏上右下角的触摸按键。
+                        // 温度偏移设置页 -> 主页面
+                        // 离开温度偏移页时保存偏移量到 NVS (改动后记忆)。
+                        thermostat_temp_offset_save(s_thermostat);
                         s_thermostat->current_page = UI_PAGE_MAIN;
-                        ESP_LOGI(TAG, "FUNC press -> Back to MAIN page (countdown not started)");
+                        ESP_LOGI(TAG, "FUNC press -> Back to MAIN page (temp offset saved)");
                     }
                 }
             }

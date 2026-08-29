@@ -696,6 +696,11 @@ void app_main(void) {
     //     首次开机无记录时保持默认值 (30 分钟)。
     thermostat_sleep_timer_load(&s_thermostat);
 
+    // 3.2 从 NVS 读取记忆的 Temp Offset 设定值
+    //     需求：温度偏移量改动后记忆，下次上电读取记忆的设置。
+    //     首次开机无记录时保持默认值 (0.0 ℃)。
+    thermostat_temp_offset_load(&s_thermostat);
+
     // 4. 初始化 DHT11 传感器
     ESP_ERROR_CHECK(dht11_init(&s_dht11, GPIO_DHT11_DATA));
 

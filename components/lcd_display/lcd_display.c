@@ -54,6 +54,7 @@ static lv_obj_t *s_main_cont = NULL;          // 主页面主容器
 static lv_obj_t *s_cont_top_bar = NULL;       // 顶部状态栏白底容器
 static lv_obj_t *s_lbl_time = NULL;           // 顶部信息栏 (日期/时间)
 static lv_obj_t *s_lbl_wifi = NULL;           // 顶部信息栏 (Wi-Fi 图标)
+static lv_obj_t *s_lbl_heat_top = NULL;       // 顶部信息栏 (加热状态 "H"，位于 Wi-Fi 图标左侧)
 
 static lv_obj_t *s_arc_current = NULL;        // 当前温度蓝色圆弧
 static lv_obj_t *s_arc_target = NULL;         // 目标温度黄色调节圆弧 (可拖动)
@@ -92,6 +93,11 @@ static lv_obj_t *s_lbl_sleep_options[4]; // 4 个选项文字标签
 #define SLEEP_OPT_BOX_H      36
 #define SLEEP_TITLE_BOTTOM   66
 #define SLEEP_SCREEN_BOTTOM  302
+
+// ---- 温度偏移 (Temp Offset) 设置页控件 ----
+static lv_obj_t *s_lbl_offset_title;     // 页面标题 "TEMP OFFSET SETTING"
+static lv_obj_t *s_lbl_offset_value;     // 大号偏移值显示 "CALIB: -1.5°C"
+static lv_obj_t *s_lbl_offset_hint;      // 操作提示 "Rotate knob to adjust"
 
 // ---- 触摸校准页面控件 ----
 static lv_obj_t *s_calib_title;
@@ -179,11 +185,27 @@ static void btn_timer_click_cb(lv_event_t *e) {
     }
 }
 
-// 底部 Heat 按钮点击事件回调
-static void btn_heat_click_cb(lv_event_t *e) {
+// 底部 Settings 按钮点击事件回调
+// 行为与物理 FUNC 按键一致：开机下短按循环切换页面
+// (主页面 -> Sleep Timer 设置页 -> 温度偏移设置页 -> 主页面)。
+static void btn_settings_click_cb(lv_event_t *e) {
     if (!s_dev || s_dev->mode != THERMOSTAT_MODE_ON) return;
     s_dev->last_input_time_ms = esp_timer_get_time() / 1000;
-    ESP_LOGI(TAG, "Touch Heat button clicked, heating status: %d", (int)s_dev->is_heating);
+
+    // 页面循环：主页面 -> Sleep Timer 设置页 -> 温度偏移设置页 -> 主页面
+    // 离开温度偏移页时保存偏移量到 NVS (改动后记忆)。
+    if (s_dev->current_page == UI_PAGE_MAIN) {
+        s_dev->current_page = UI_PAGE_SLEEP_TIMER;
+        ESP_LOGI(TAG, "Touch Settings button -> Enter SLEEP TIMER SETTING page");
+    } else if (s_dev->current_page == UI_PAGE_SLEEP_TIMER) {
+        s_dev->current_page = UI_PAGE_TEMP_OFFSET;
+        ESP_LOGI(TAG, "Touch Settings button -> Enter TEMP OFFSET SETTING page");
+    } else {
+        // 温度偏移设置页 -> 主页面
+        thermostat_temp_offset_save(s_dev);
+        s_dev->current_page = UI_PAGE_MAIN;
+        ESP_LOGI(TAG, "Touch Settings button -> Back to MAIN page (temp offset saved)");
+    }
 }
 
 // 更新黄色刻度线外侧目标温度标签的绝对位置
@@ -240,6 +262,14 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_text_font(s_lbl_time, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_lbl_time, lv_color_black(), 0);
     lv_obj_align(s_lbl_time, LV_ALIGN_LEFT_MID, 8, 0);
+
+    // 右侧：加热状态 "H" (位于 Wi-Fi 图标左侧)
+    // 需求：不加热时显示黑色，加热时显示红色。
+    s_lbl_heat_top = lv_label_create(s_cont_top_bar);
+    lv_obj_set_style_text_font(s_lbl_heat_top, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_heat_top, lv_color_black(), 0);
+    lv_label_set_text(s_lbl_heat_top, "H");
+    lv_obj_align(s_lbl_heat_top, LV_ALIGN_RIGHT_MID, -30, 0);
 
     // 右侧：Wi-Fi 状态图标
     s_lbl_wifi = lv_label_create(s_cont_top_bar);
@@ -381,7 +411,7 @@ static void ui_create_main_page(void) {
     lv_obj_align(s_lbl_current_title, LV_ALIGN_CENTER, 0, 34);
 
     // 3. 底部状态与操作栏 (Bottom Area) - 纯二维直角设计，彻底消除倒角线彩虹纹
-    // 3.1 左侧：加热状态卡片 (HEAT / OFF)
+    // 3.1 左侧：Settings 卡片/按钮 (点击行为与物理 FUNC 按键一致，循环切换页面)
     s_btn_heat = lv_btn_create(s_main_cont);
     lv_obj_set_size(s_btn_heat, 108, 62);
     lv_obj_align(s_btn_heat, LV_ALIGN_BOTTOM_LEFT, 8, -12);  // 上移避开触摸校准底部盲区
@@ -390,12 +420,12 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_border_width(s_btn_heat, 2, 0);
     lv_obj_set_style_radius(s_btn_heat, 0, 0); // 直角无倒角抗锯齿彩虹
     lv_obj_set_style_pad_all(s_btn_heat, 4, 0);
-    lv_obj_add_event_cb(s_btn_heat, btn_heat_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_btn_heat, btn_settings_click_cb, LV_EVENT_CLICKED, NULL);
 
     s_lbl_heat_title = lv_label_create(s_btn_heat);
     lv_obj_set_style_text_font(s_lbl_heat_title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_lbl_heat_title, lv_color_white(), 0);
-    lv_label_set_text(s_lbl_heat_title, "HEATER");
+    lv_label_set_text(s_lbl_heat_title, "SETTINGS");
     lv_obj_align(s_lbl_heat_title, LV_ALIGN_TOP_MID, 0, 2);
     lv_obj_clear_flag(s_lbl_heat_title, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_lbl_heat_title, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -403,7 +433,7 @@ static void ui_create_main_page(void) {
     s_lbl_heat_status = lv_label_create(s_btn_heat);
     lv_obj_set_style_text_font(s_lbl_heat_status, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_lbl_heat_status, lv_color_hex(0x94A3B8), 0);
-    lv_label_set_text(s_lbl_heat_status, "OFF");
+    lv_label_set_text(s_lbl_heat_status, "MENU");
     lv_obj_align(s_lbl_heat_status, LV_ALIGN_BOTTOM_MID, 0, -2);
     lv_obj_clear_flag(s_lbl_heat_status, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_lbl_heat_status, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -495,6 +525,49 @@ static void ui_create_sleep_timer_page(void) {
     }
 }
 
+// 创建温度偏移 (Temp Offset) 设置页控件
+static void ui_create_temp_offset_page(void) {
+    // 页面标题栏 (与 Sleep Timer 页风格一致，蓝色标题栏)
+    s_lbl_offset_title = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_lbl_offset_title, LCD_H_RES, 36);
+    lv_obj_set_style_bg_color(s_lbl_offset_title, lv_color_hex(0x0055AA), 0);
+    lv_obj_set_style_bg_opa(s_lbl_offset_title, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_lbl_offset_title, 0, 0);
+    lv_obj_set_style_radius(s_lbl_offset_title, 0, 0);
+    lv_obj_set_style_pad_all(s_lbl_offset_title, 0, 0);
+    lv_obj_align(s_lbl_offset_title, LV_ALIGN_TOP_MID, 0, 30);
+
+    lv_obj_t *title_lbl = lv_label_create(s_lbl_offset_title);
+    lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title_lbl, lv_color_black(), 0);
+    lv_label_set_text(title_lbl, "TEMP OFFSET SETTING");
+    lv_obj_center(title_lbl);
+
+    // 大号偏移值显示 "CALIB: -1.5°C"
+    s_lbl_offset_value = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_font(s_lbl_offset_value, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(s_lbl_offset_value, lv_color_white(), 0);
+    lv_label_set_text(s_lbl_offset_value, "CALIB: 0.0°C");
+    lv_obj_align(s_lbl_offset_value, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
+
+    // 操作提示文字
+    s_lbl_offset_hint = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_font(s_lbl_offset_hint, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_offset_hint, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(s_lbl_offset_hint, "Rotate knob to adjust");
+    lv_obj_align(s_lbl_offset_hint, LV_ALIGN_CENTER, 0, 30);
+    lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
+}
+
+// 更新温度偏移 (Temp Offset) 设置页显示内容
+static void ui_update_temp_offset_page(void) {
+    char buf[32];
+    // 需求：显示 "CALIB: X.X°C"，如 "CALIB: -1.5°C"
+    snprintf(buf, sizeof(buf), "CALIB: %+.1f°C", s_dev->temp_offset);
+    lv_label_set_text(s_lbl_offset_value, buf);
+}
+
 // 创建触摸校准页面控件
 static void ui_create_calib_page(void) {
     s_calib_title = lv_label_create(lv_scr_act());
@@ -558,6 +631,9 @@ static void ui_calib_hide_all_normal(void) {
     for (int i = 0; i < 4; i++) {
         if (s_sleep_opt_box[i]) lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
     }
+    if (s_lbl_offset_title) lv_obj_add_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
+    if (s_lbl_offset_value) lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
+    if (s_lbl_offset_hint) lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void ui_calib_restore_all_normal(void) {
@@ -709,15 +785,12 @@ static void ui_update_main_page(void) {
     lv_label_set_text(s_lbl_target_temp_val, buf);
     update_target_indicator_pos(s_dev->target_temp);
 
-    // 5. 加热状态卡片
+    // 5. 顶部加热状态 "H" (位于 Wi-Fi 图标左侧)
+    //    需求：不加热时显示黑色，加热时显示红色。
     if (s_dev->is_heating) {
-        lv_label_set_text(s_lbl_heat_status, "HEAT");
-        lv_obj_set_style_text_color(s_lbl_heat_status, lv_color_hex(0xFF3333), 0);
-        lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0xFF3333), 0);
+        lv_obj_set_style_text_color(s_lbl_heat_top, lv_color_hex(0xFF0000), 0);
     } else {
-        lv_label_set_text(s_lbl_heat_status, "OFF");
-        lv_obj_set_style_text_color(s_lbl_heat_status, lv_color_hex(0x94A3B8), 0);
-        lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0x334155), 0);
+        lv_obj_set_style_text_color(s_lbl_heat_top, lv_color_black(), 0);
     }
 
     // 6. Sleep Timer 卡片
@@ -749,6 +822,14 @@ static void ui_update_standby_page(void) {
     lv_label_set_text(s_lbl_time, buf);
     ui_update_wifi_symbol();
 
+    // 顶部加热状态 "H" (位于 Wi-Fi 图标左侧)
+    // 需求：不加热时显示黑色，加热时显示红色。
+    if (s_dev->is_heating) {
+        lv_obj_set_style_text_color(s_lbl_heat_top, lv_color_hex(0xFF0000), 0);
+    } else {
+        lv_obj_set_style_text_color(s_lbl_heat_top, lv_color_black(), 0);
+    }
+
     int cur_int = (int)floorf(s_dev->current_temp);
     int cur_dec = (int)roundf((s_dev->current_temp - cur_int) * 10.0f);
     if (cur_dec >= 10) { cur_dec = 0; cur_int += 1; }
@@ -779,6 +860,9 @@ static void ui_render(void) {
         for (int i = 0; i < 4; i++) {
             lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
         }
+        lv_obj_add_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
         ui_update_standby_page();
         return;
     }
@@ -794,7 +878,28 @@ static void ui_render(void) {
         for (int i = 0; i < 4; i++) {
             lv_obj_clear_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
         }
+        lv_obj_add_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
         ui_update_sleep_timer_page();
+        return;
+    }
+
+    // 温度偏移 (Temp Offset) 设置页
+    if (s_dev->current_page == UI_PAGE_TEMP_OFFSET) {
+        lv_obj_clear_flag(s_cont_top_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_standby_temp, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_standby_temp_dec, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_main_cont, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_lbl_sleep_title, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 4; i++) {
+            lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_clear_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
+        ui_update_temp_offset_page();
         return;
     }
 
@@ -808,6 +913,9 @@ static void ui_render(void) {
     for (int i = 0; i < 4; i++) {
         lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
     }
+    lv_obj_add_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
     ui_update_main_page();
 }
 
@@ -899,6 +1007,7 @@ esp_err_t lcd_display_init(thermostat_dev_t *dev) {
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x0A0D14), 0);
     ui_create_main_page();
     ui_create_sleep_timer_page();
+    ui_create_temp_offset_page();
     ui_create_calib_page();
     ui_render();
     lvgl_port_unlock();

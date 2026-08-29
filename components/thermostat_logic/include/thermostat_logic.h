@@ -19,8 +19,9 @@ typedef enum {
  * @brief UI 页面枚举
  */
 typedef enum {
-    UI_PAGE_MAIN        = 0, // 主页面
-    UI_PAGE_SLEEP_TIMER = 1, // Sleep Timer 设置页
+    UI_PAGE_MAIN         = 0, // 主页面
+    UI_PAGE_SLEEP_TIMER  = 1, // Sleep Timer 设置页
+    UI_PAGE_TEMP_OFFSET  = 2, // 温度偏移 (Temp Offset) 设置页
 } ui_page_t;
 
 /**
@@ -72,6 +73,11 @@ typedef struct {
     int sleep_timer_setting;      // 设定值 (10, 30, 60, 90 分钟)
     bool sleep_timer_active;      // 是否正在倒计时
     int64_t sleep_timer_start_ms; // 倒计时开始时间戳 (ms)
+
+    // ---- 温度偏移 (Temp Offset) 校准 ----
+    // 用于校准温度传感器读数偏差，范围 [-2.0, +2.0] ℃，步进 0.5 ℃。
+    // 首次开机默认 0.0 ℃，改动后记忆 (NVS 持久化)，下次上电读取记忆值。
+    float temp_offset;            // 温度偏移量 (℃)
 } thermostat_dev_t;
 
 /**
@@ -129,6 +135,27 @@ esp_err_t thermostat_sleep_timer_load(thermostat_dev_t *dev);
  * @return esp_err_t ESP_OK 表示成功
  */
 esp_err_t thermostat_sleep_timer_save(const thermostat_dev_t *dev);
+
+/**
+ * @brief 从 NVS 读取记忆的温度偏移值并应用到 dev->temp_offset
+ *
+ * 若 NVS 中无有效记录（首次开机），则保持默认值 (0.0 ℃)。
+ * 调用前需确保 NVS 已初始化 (nvs_flash_init)。
+ *
+ * @param dev 温控器设备状态指针
+ * @return esp_err_t ESP_OK 表示成功
+ */
+esp_err_t thermostat_temp_offset_load(thermostat_dev_t *dev);
+
+/**
+ * @brief 将 dev->temp_offset 保存到 NVS，实现"改动后记忆，下次上电读取"
+ *
+ * 调用前需确保 NVS 已初始化 (nvs_flash_init)。
+ *
+ * @param dev 温控器设备状态指针
+ * @return esp_err_t ESP_OK 表示成功
+ */
+esp_err_t thermostat_temp_offset_save(const thermostat_dev_t *dev);
 
 #ifdef __cplusplus
 }

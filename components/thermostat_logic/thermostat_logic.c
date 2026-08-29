@@ -1,3 +1,4 @@
+#include <math.h>
 #include "thermostat_logic.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -12,6 +13,15 @@ static const char *TAG = "THERMOSTAT_LOGIC";
 #define SLEEP_TIMER_NVS_NAMESPACE "sleep_timer"
 #define SLEEP_TIMER_NVS_KEY       "setting"   // 设定值 (i32, 分钟)
 #define SLEEP_TIMER_DEFAULT_MIN   30          // 首次开机默认 30 分钟
+
+// ---- 温度偏移 (Temp Offset) NVS 持久化 ----
+// 需求：温度偏移校准值改动后记忆，下次上电读取记忆的设置。
+// 首次开机默认 0.0 ℃，范围 [-2.0, +2.0] ℃，步进 0.5 ℃。
+#define TEMP_OFFSET_NVS_NAMESPACE "temp_offset"
+#define TEMP_OFFSET_NVS_KEY       "offset"    // 偏移量 (i32, 单位 0.1 ℃)
+#define TEMP_OFFSET_DEFAULT       0.0f        // 首次开机默认 0.0 ℃
+#define TEMP_OFFSET_MIN           -2.0f       // 最小偏移 -2.0 ℃
+#define TEMP_OFFSET_MAX           2.0f        // 最大偏移 +2.0 ℃
 
 esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     if (!dev) return ESP_ERR_INVALID_ARG;
@@ -33,6 +43,11 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     dev->sleep_timer_setting = SLEEP_TIMER_DEFAULT_MIN;
     dev->sleep_timer_active = false;
     dev->sleep_timer_start_ms = 0;
+
+    // 温度偏移初始化
+    // 首次开机默认 0.0 ℃。若 NVS 中已有记忆值，
+    // 由 thermostat_temp_offset_load() 在启动时覆盖。
+    dev->temp_offset = TEMP_OFFSET_DEFAULT;
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << heater_gpio),
@@ -134,6 +149,9 @@ void thermostat_factory_reset(thermostat_dev_t *dev) {
     dev->sleep_timer_active = false;
     dev->sleep_timer_start_ms = 0;
 
+    // 清空温度偏移 (恢复默认 0.0 ℃)
+    dev->temp_offset = TEMP_OFFSET_DEFAULT;
+
     // 请求播放恢复出厂灯效
     dev->pending_led_effect = LED_EFFECT_FACTORY_RESET;
 
@@ -213,6 +231,73 @@ esp_err_t thermostat_sleep_timer_save(const thermostat_dev_t *dev) {
         ESP_LOGI(TAG, "Sleep Timer setting saved to NVS: %d min", dev->sleep_timer_setting);
     } else {
         ESP_LOGE(TAG, "Failed to save Sleep Timer setting to NVS: %d", err);
+    }
+    return err;
+}
+
+// 从 NVS 读取记忆的温度偏移值并应用到 dev->temp_offset
+// 若 NVS 中无有效记录（首次开机），保持默认值 (0.0 ℃)。
+esp_err_t thermostat_temp_offset_load(thermostat_dev_t *dev) {
+    if (!dev) return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TEMP_OFFSET_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        // 命名空间不存在（首次开机）：保持默认值
+        ESP_LOGI(TAG, "Temp Offset NVS namespace not found, using default %.1f C",
+                 TEMP_OFFSET_DEFAULT);
+        return ESP_OK;
+    }
+
+    // 以 0.1 ℃ 为单位存储为 i32，避免浮点精度问题
+    int32_t offset_tenths = 0;
+    err = nvs_get_i32(handle, TEMP_OFFSET_NVS_KEY, &offset_tenths);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        // 键不存在（首次开机）：保持默认值
+        ESP_LOGI(TAG, "Temp Offset setting not found in NVS, using default %.1f C",
+                 TEMP_OFFSET_DEFAULT);
+        return ESP_OK;
+    }
+
+    float offset = (float)offset_tenths * 0.1f;
+
+    // 校验偏移量合法性：范围 [-2.0, +2.0] ℃，否则回退默认
+    if (offset < TEMP_OFFSET_MIN || offset > TEMP_OFFSET_MAX) {
+        ESP_LOGW(TAG, "Invalid saved Temp Offset %.1f C, using default %.1f C",
+                 offset, TEMP_OFFSET_DEFAULT);
+        return ESP_OK;
+    }
+
+    dev->temp_offset = offset;
+    ESP_LOGI(TAG, "Temp Offset loaded from NVS: %.1f C", dev->temp_offset);
+    return ESP_OK;
+}
+
+// 将 dev->temp_offset 保存到 NVS，实现"改动后记忆，下次上电读取"
+esp_err_t thermostat_temp_offset_save(const thermostat_dev_t *dev) {
+    if (!dev) return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TEMP_OFFSET_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS namespace '%s': %d", TEMP_OFFSET_NVS_NAMESPACE, err);
+        return err;
+    }
+
+    // 以 0.1 ℃ 为单位存储为 i32，避免浮点精度问题
+    int32_t offset_tenths = (int32_t)lroundf(dev->temp_offset * 10.0f);
+    err = nvs_set_i32(handle, TEMP_OFFSET_NVS_KEY, offset_tenths);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Temp Offset saved to NVS: %.1f C", dev->temp_offset);
+    } else {
+        ESP_LOGE(TAG, "Failed to save Temp Offset to NVS: %d", err);
     }
     return err;
 }

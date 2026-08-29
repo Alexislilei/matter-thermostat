@@ -505,6 +505,24 @@ sy = (337 - 345) × 319 / (1815 - 345) = -8 × 319 / 1470 ≈ -1.7
    - **显示/隐藏**：`ui_render()` 与 `ui_calib_hide_all_normal()` 同步处理待机页小数标签的显示与隐藏。
 2. **`docs/01_requirements.md`**：同步更新主页面与待机页当前温度显示描述（3 位有效数字、小数位半字号、整体下移）。
 
+### 3.26 底部 HEATER 按钮改为 SETTINGS 按钮 + 新增温度偏移 (Temp Offset) 设置页 + 顶部加热状态 "H" 指示（已完成）
+根据需求完成以下三项改动：
+
+1. **底部左侧按钮由 HEATER 改为 SETTINGS（触摸行为与物理 FUNC 键一致）**
+   - **`components/lcd_display/lcd_display.c`**：按钮标题由 `HEATER` 改为 `SETTINGS`，状态文字由 `OFF` 改为 `MENU`；点击回调由 `btn_heat_click_cb` 改为 `btn_settings_click_cb`，实现与物理 FUNC 键相同的页面循环（主页面 → Sleep Timer 设置页 → 温度偏移设置页 → 主页面）。
+
+2. **新增温度偏移 (Temp Offset) 设置页**
+   - **页面循环**：主页面 → Sleep Timer 设置页 → 温度偏移设置页 → 主页面。
+   - **显示**：大号文字 `CALIB: -1.5°C`（montserrat_32），标题栏 `TEMP OFFSET SETTING`，提示 `Rotate knob to adjust`。
+   - **编码器操作**：顺时针 +0.5°C，逆时针 -0.5°C，范围限制 `[-2.0, +2.0]` ℃。
+   - **NVS 持久化**：`components/thermostat_logic/thermostat_logic.c` 新增 `thermostat_temp_offset_load()` / `thermostat_temp_offset_save()`（以 0.1℃ 为单位存 i32，避免浮点精度问题）；`components/button_handler/button_handler.c` 在 1 秒无操作或按下 FUNC/Settings 返回主页面时自动保存；首次开机默认 `0.0 ℃`。
+   - **`main/main.c`**：启动时调用 `thermostat_temp_offset_load()` 读取记忆值。
+
+3. **顶部加热状态指示（位于 Wi-Fi 符号左侧）**
+   - **`components/lcd_display/lcd_display.c`**：新增 `s_lbl_heat_top` 标签，位于顶部信息栏 Wi-Fi 图标左侧（`LV_ALIGN_RIGHT_MID, -30, 0`）。
+   - **符号**：因 LVGL 8.3 无内置 `LV_SYMBOL_FIRE` 火焰图标，按用户要求使用大写字母 `H` 表示加热状态。
+   - **颜色**：不加热时显示黑色，加热时显示红色（`0xFF0000`）。主页面与待机页均同步更新。
+
 ---
 
 ## 4. 未完成 / 待处理事项
