@@ -74,16 +74,16 @@ static lv_obj_t *s_btn_heat = NULL;           // 底部左侧：加热状态卡�
 static lv_obj_t *s_lbl_heat_title = NULL;     // "HEAT" 标题
 static lv_obj_t *s_lbl_heat_status = NULL;    // "ON" / "OFF"
 
-static lv_obj_t *s_btn_timer = NULL;          // 底部右侧：Sleep Timer 卡片/按钮
-static lv_obj_t *s_lbl_timer_title = NULL;    // "SLEEP TIMER"
+static lv_obj_t *s_btn_timer = NULL;          // 底部右侧：Off Timer 卡片/按钮
+static lv_obj_t *s_lbl_timer_title = NULL;    // "OFF TIMER"
 static lv_obj_t *s_lbl_timer_val = NULL;      // "OFF" 或倒计时 "28:30"
 
 static lv_obj_t *s_lbl_standby = NULL;        // 待机页 STANDBY 文字
 static lv_obj_t *s_lbl_standby_temp = NULL;   // 待机页当前温度整数部分文字
 static lv_obj_t *s_lbl_standby_temp_dec = NULL;// 待机页当前温度小数部分文字
 
-// ---- Sleep Timer 设置页控件 ----
-static lv_obj_t *s_lbl_sleep_title;      // 页面标题 "SLEEP TIMER SETTING"
+// ---- Off Timer 设置页控件 ----
+static lv_obj_t *s_lbl_sleep_title;      // 页面标题 "OFF TIMER SETTING"
 static lv_obj_t *s_sleep_opt_box[4];     // 4 个选项容器 (10 / 30 / 60 / 90 MIN)
 static lv_obj_t *s_lbl_sleep_options[4]; // 4 个选项文字标签
 
@@ -98,6 +98,14 @@ static lv_obj_t *s_lbl_sleep_options[4]; // 4 个选项文字标签
 static lv_obj_t *s_lbl_offset_title;     // 页面标题 "TEMP OFFSET SETTING"
 static lv_obj_t *s_lbl_offset_value;     // 大号偏移值显示 "CALIB: -1.5°C"
 static lv_obj_t *s_lbl_offset_hint;      // 操作提示 "Rotate knob to adjust"
+
+// ---- 设置页面底部导航按钮 (PREV / NEXT) ----
+static lv_obj_t *s_btn_nav_prev = NULL;       // 回到前一页按钮
+static lv_obj_t *s_lbl_nav_prev_title = NULL; // "PAGE"
+static lv_obj_t *s_lbl_nav_prev_val = NULL;   // "< PREV"
+static lv_obj_t *s_btn_nav_next = NULL;       // 到下一页按钮
+static lv_obj_t *s_lbl_nav_next_title = NULL; // "PAGE"
+static lv_obj_t *s_lbl_nav_next_val = NULL;   // "NEXT >"
 
 // ---- 触摸校准页面控件 ----
 static lv_obj_t *s_calib_title;
@@ -205,6 +213,48 @@ static void btn_settings_click_cb(lv_event_t *e) {
         thermostat_temp_offset_save(s_dev);
         s_dev->current_page = UI_PAGE_MAIN;
         ESP_LOGI(TAG, "Touch Settings button -> Back to MAIN page (temp offset saved)");
+    }
+}
+
+// 设置页面底部导航按钮点击事件回调：回到前一页
+static void btn_nav_prev_click_cb(lv_event_t *e) {
+    if (!s_dev || s_dev->mode != THERMOSTAT_MODE_ON) return;
+    s_dev->last_input_time_ms = esp_timer_get_time() / 1000;
+
+    if (s_dev->current_page == UI_PAGE_TEMP_OFFSET) {
+        // 温度偏移设置页 -> Sleep Timer 设置页
+        thermostat_temp_offset_save(s_dev);
+        s_dev->current_page = UI_PAGE_SLEEP_TIMER;
+        ESP_LOGI(TAG, "Touch Prev button -> Enter SLEEP TIMER page (temp offset saved)");
+    } else if (s_dev->current_page == UI_PAGE_SLEEP_TIMER) {
+        // Sleep Timer 设置页 -> 主页面
+        s_dev->current_page = UI_PAGE_MAIN;
+        ESP_LOGI(TAG, "Touch Prev button -> Back to MAIN page");
+    } else {
+        // 主页面 -> 温度偏移设置页
+        s_dev->current_page = UI_PAGE_TEMP_OFFSET;
+        ESP_LOGI(TAG, "Touch Prev button -> Enter TEMP OFFSET page");
+    }
+}
+
+// 设置页面底部导航按钮点击事件回调：到下一页
+static void btn_nav_next_click_cb(lv_event_t *e) {
+    if (!s_dev || s_dev->mode != THERMOSTAT_MODE_ON) return;
+    s_dev->last_input_time_ms = esp_timer_get_time() / 1000;
+
+    if (s_dev->current_page == UI_PAGE_MAIN) {
+        // 主页面 -> Sleep Timer 设置页
+        s_dev->current_page = UI_PAGE_SLEEP_TIMER;
+        ESP_LOGI(TAG, "Touch Next button -> Enter SLEEP TIMER page");
+    } else if (s_dev->current_page == UI_PAGE_SLEEP_TIMER) {
+        // Sleep Timer 设置页 -> 温度偏移设置页
+        s_dev->current_page = UI_PAGE_TEMP_OFFSET;
+        ESP_LOGI(TAG, "Touch Next button -> Enter TEMP OFFSET page");
+    } else {
+        // 温度偏移设置页 -> 主页面
+        thermostat_temp_offset_save(s_dev);
+        s_dev->current_page = UI_PAGE_MAIN;
+        ESP_LOGI(TAG, "Touch Next button -> Back to MAIN page (temp offset saved)");
     }
 }
 
@@ -415,7 +465,7 @@ static void ui_create_main_page(void) {
     lv_label_set_text(s_lbl_current_title, "ROOM");
     lv_obj_align(s_lbl_current_title, LV_ALIGN_CENTER, 0, 24);
 
-    // 3. 底部状态与操作栏 (Bottom Area) - 纯二维直角设计，彻底消除倒角线彩虹纹
+    // 3. 底部状态与操作栏 (Bottom Area) - 增加四角圆形倒角
     // 3.1 左侧：Settings 卡片/按钮 (点击行为与物理 FUNC 按键一致，循环切换页面)
     s_btn_heat = lv_btn_create(s_main_cont);
     lv_obj_set_size(s_btn_heat, 108, 62);
@@ -423,7 +473,7 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_bg_color(s_btn_heat, lv_color_hex(0x131A26), 0);
     lv_obj_set_style_border_color(s_btn_heat, lv_color_hex(0x334155), 0);
     lv_obj_set_style_border_width(s_btn_heat, 2, 0);
-    lv_obj_set_style_radius(s_btn_heat, 0, 0); // 直角无倒角抗锯齿彩虹
+    lv_obj_set_style_radius(s_btn_heat, 10, 0); // 按钮四角增加圆形倒角
     lv_obj_set_style_pad_all(s_btn_heat, 4, 0);
     lv_obj_add_event_cb(s_btn_heat, btn_settings_click_cb, LV_EVENT_CLICKED, NULL);
 
@@ -450,14 +500,14 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_bg_color(s_btn_timer, lv_color_hex(0x131A26), 0);
     lv_obj_set_style_border_color(s_btn_timer, lv_color_hex(0x334155), 0);
     lv_obj_set_style_border_width(s_btn_timer, 2, 0);
-    lv_obj_set_style_radius(s_btn_timer, 0, 0); // 直角无倒角抗锯齿彩虹
+    lv_obj_set_style_radius(s_btn_timer, 10, 0); // 按钮四角增加圆形倒角
     lv_obj_set_style_pad_all(s_btn_timer, 4, 0);
     lv_obj_add_event_cb(s_btn_timer, btn_timer_click_cb, LV_EVENT_CLICKED, NULL);
 
     s_lbl_timer_title = lv_label_create(s_btn_timer);
     lv_obj_set_style_text_font(s_lbl_timer_title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_lbl_timer_title, lv_color_white(), 0);
-    lv_label_set_text(s_lbl_timer_title, "SLEEP TIMER");
+    lv_label_set_text(s_lbl_timer_title, "OFF TIMER");
     lv_obj_align(s_lbl_timer_title, LV_ALIGN_TOP_MID, 0, 2);
     lv_obj_clear_flag(s_lbl_timer_title, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_lbl_timer_title, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -492,7 +542,7 @@ static void ui_create_main_page(void) {
     lv_obj_add_flag(s_lbl_standby, LV_OBJ_FLAG_HIDDEN);
 }
 
-// 创建 Sleep Timer 设置页控件
+// 创建 Off Timer 设置页控件
 static void ui_create_sleep_timer_page(void) {
     static const char *option_texts[4] = {"10 MIN", "30 MIN", "60 MIN", "90 MIN"};
 
@@ -508,7 +558,7 @@ static void ui_create_sleep_timer_page(void) {
     lv_obj_t *title_lbl = lv_label_create(s_lbl_sleep_title);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(title_lbl, lv_color_black(), 0);
-    lv_label_set_text(title_lbl, "SLEEP TIMER SETTING");
+    lv_label_set_text(title_lbl, "OFF TIMER SETTING");
     lv_obj_center(title_lbl);
 
     for (int i = 0; i < 4; i++) {
@@ -571,6 +621,67 @@ static void ui_update_temp_offset_page(void) {
     // 需求：显示 "CALIB: X.X°C"，如 "CALIB: -1.5°C"
     snprintf(buf, sizeof(buf), "CALIB: %+.1f°C", s_dev->temp_offset);
     lv_label_set_text(s_lbl_offset_value, buf);
+}
+
+// 创建设置页面底部导航按钮 (PREV / NEXT)
+static void ui_create_nav_buttons(void) {
+    // 左侧：PREV 按钮 (回到前一页)
+    s_btn_nav_prev = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(s_btn_nav_prev, 108, 62);
+    lv_obj_align(s_btn_nav_prev, LV_ALIGN_BOTTOM_LEFT, 8, -12);
+    lv_obj_set_style_bg_color(s_btn_nav_prev, lv_color_hex(0x131A26), 0);
+    lv_obj_set_style_border_color(s_btn_nav_prev, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_border_width(s_btn_nav_prev, 2, 0);
+    lv_obj_set_style_radius(s_btn_nav_prev, 10, 0); // 按钮四角增加圆形倒角
+    lv_obj_set_style_pad_all(s_btn_nav_prev, 4, 0);
+    lv_obj_add_event_cb(s_btn_nav_prev, btn_nav_prev_click_cb, LV_EVENT_CLICKED, NULL);
+
+    s_lbl_nav_prev_title = lv_label_create(s_btn_nav_prev);
+    lv_obj_set_style_text_font(s_lbl_nav_prev_title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_nav_prev_title, lv_color_white(), 0);
+    lv_label_set_text(s_lbl_nav_prev_title, "PAGE");
+    lv_obj_align(s_lbl_nav_prev_title, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_clear_flag(s_lbl_nav_prev_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lbl_nav_prev_title, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    s_lbl_nav_prev_val = lv_label_create(s_btn_nav_prev);
+    lv_obj_set_style_text_font(s_lbl_nav_prev_val, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lbl_nav_prev_val, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(s_lbl_nav_prev_val, "< PREV");
+    lv_obj_align(s_lbl_nav_prev_val, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_clear_flag(s_lbl_nav_prev_val, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lbl_nav_prev_val, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    lv_obj_add_flag(s_btn_nav_prev, LV_OBJ_FLAG_HIDDEN);
+
+    // 右侧：NEXT 按钮 (到下一页)
+    s_btn_nav_next = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(s_btn_nav_next, 108, 62);
+    lv_obj_align(s_btn_nav_next, LV_ALIGN_BOTTOM_RIGHT, -8, -12);
+    lv_obj_set_style_bg_color(s_btn_nav_next, lv_color_hex(0x131A26), 0);
+    lv_obj_set_style_border_color(s_btn_nav_next, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_border_width(s_btn_nav_next, 2, 0);
+    lv_obj_set_style_radius(s_btn_nav_next, 10, 0); // 按钮四角增加圆形倒角
+    lv_obj_set_style_pad_all(s_btn_nav_next, 4, 0);
+    lv_obj_add_event_cb(s_btn_nav_next, btn_nav_next_click_cb, LV_EVENT_CLICKED, NULL);
+
+    s_lbl_nav_next_title = lv_label_create(s_btn_nav_next);
+    lv_obj_set_style_text_font(s_lbl_nav_next_title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lbl_nav_next_title, lv_color_white(), 0);
+    lv_label_set_text(s_lbl_nav_next_title, "PAGE");
+    lv_obj_align(s_lbl_nav_next_title, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_clear_flag(s_lbl_nav_next_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lbl_nav_next_title, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    s_lbl_nav_next_val = lv_label_create(s_btn_nav_next);
+    lv_obj_set_style_text_font(s_lbl_nav_next_val, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lbl_nav_next_val, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(s_lbl_nav_next_val, "NEXT >");
+    lv_obj_align(s_lbl_nav_next_val, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_clear_flag(s_lbl_nav_next_val, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lbl_nav_next_val, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    lv_obj_add_flag(s_btn_nav_next, LV_OBJ_FLAG_HIDDEN);
 }
 
 // 创建触摸校准页面控件
@@ -639,6 +750,8 @@ static void ui_calib_hide_all_normal(void) {
     if (s_lbl_offset_title) lv_obj_add_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
     if (s_lbl_offset_value) lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
     if (s_lbl_offset_hint) lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
+    if (s_btn_nav_prev) lv_obj_add_flag(s_btn_nav_prev, LV_OBJ_FLAG_HIDDEN);
+    if (s_btn_nav_next) lv_obj_add_flag(s_btn_nav_next, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void ui_calib_restore_all_normal(void) {
@@ -690,7 +803,8 @@ static void ui_update_sleep_timer_page(void) {
         int offset = i - sel;
         lv_coord_t center_y = SLEEP_OPT_CENTER_Y + offset * SLEEP_OPT_SPACING;
 
-        if (center_y < SLEEP_TITLE_BOTTOM || center_y > SLEEP_SCREEN_BOTTOM) {
+        // 最多只显示选中项上方 1 项 (offset == -1) 和下方 1 项 (offset == 1)
+        if (offset < -1 || offset > 1 || center_y < SLEEP_TITLE_BOTTOM || center_y > SLEEP_SCREEN_BOTTOM) {
             lv_obj_add_flag(s_sleep_opt_box[i], LV_OBJ_FLAG_HIDDEN);
             continue;
         }
@@ -868,6 +982,8 @@ static void ui_render(void) {
         lv_obj_add_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
+        if (s_btn_nav_prev) lv_obj_add_flag(s_btn_nav_prev, LV_OBJ_FLAG_HIDDEN);
+        if (s_btn_nav_next) lv_obj_add_flag(s_btn_nav_next, LV_OBJ_FLAG_HIDDEN);
         ui_update_standby_page();
         return;
     }
@@ -886,6 +1002,8 @@ static void ui_render(void) {
         lv_obj_add_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
+        if (s_btn_nav_prev) lv_obj_clear_flag(s_btn_nav_prev, LV_OBJ_FLAG_HIDDEN);
+        if (s_btn_nav_next) lv_obj_clear_flag(s_btn_nav_next, LV_OBJ_FLAG_HIDDEN);
         ui_update_sleep_timer_page();
         return;
     }
@@ -904,6 +1022,8 @@ static void ui_render(void) {
         lv_obj_clear_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
+        if (s_btn_nav_prev) lv_obj_clear_flag(s_btn_nav_prev, LV_OBJ_FLAG_HIDDEN);
+        if (s_btn_nav_next) lv_obj_clear_flag(s_btn_nav_next, LV_OBJ_FLAG_HIDDEN);
         ui_update_temp_offset_page();
         return;
     }
@@ -921,6 +1041,8 @@ static void ui_render(void) {
     lv_obj_add_flag(s_lbl_offset_title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_lbl_offset_value, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_lbl_offset_hint, LV_OBJ_FLAG_HIDDEN);
+    if (s_btn_nav_prev) lv_obj_add_flag(s_btn_nav_prev, LV_OBJ_FLAG_HIDDEN);
+    if (s_btn_nav_next) lv_obj_add_flag(s_btn_nav_next, LV_OBJ_FLAG_HIDDEN);
     ui_update_main_page();
 }
 
@@ -1013,6 +1135,7 @@ esp_err_t lcd_display_init(thermostat_dev_t *dev) {
     ui_create_main_page();
     ui_create_sleep_timer_page();
     ui_create_temp_offset_page();
+    ui_create_nav_buttons();
     ui_create_calib_page();
     ui_render();
     lvgl_port_unlock();
