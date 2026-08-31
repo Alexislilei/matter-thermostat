@@ -233,11 +233,11 @@ void button_handler_poll(void) {
                 if (new_offset >  2.0f) new_offset =  2.0f;
 
                 if (new_offset != s_thermostat->temp_offset) {
-                    s_thermostat->temp_offset = new_offset;
+                    thermostat_set_temp_offset(s_thermostat, new_offset);
                     // 有新的调整，重置 1 秒自动保存标志
                     s_temp_offset_saved = false;
-                    ESP_LOGI(TAG, "Temp Offset adjusted to: %+.1f C",
-                             s_thermostat->temp_offset);
+                    ESP_LOGI(TAG, "Temp Offset adjusted to: %+.1f C (Current temp: %.1f C)",
+                             s_thermostat->temp_offset, s_thermostat->current_temp);
                 }
             } else {
                 // 主页面：调整目标温度 (encoder_direction 绝对值 = 卡点数)

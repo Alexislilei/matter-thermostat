@@ -39,10 +39,11 @@ typedef enum {
 typedef struct {
     gpio_num_t heater_gpio;         // GPIO22
     float target_temp;              // 设定目标温度 (15.0 ~ 25.0 ℃)
-    float current_temp;             // 当前滤波后的实测温度
+    float raw_temp;                 // 传感器最新实测原始温度 (滤波后)
+    float current_temp;             // 补偿后的有效显示与控制温度 (raw_temp + temp_offset)
     thermostat_mode_t mode;         // 系统运行模式
     bool is_heating;                // 当前加热器 Relay 控制状态 (HIGH/LOW)
-
+ 
     /**
      * @brief Wi-Fi 连接状态
      * true  = Wi-Fi STA 已连接并获得 IP (esp_netif_is_netif_up)
@@ -89,9 +90,17 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio);
  * @brief 运行迟滞温控控制算法 (Hysteresis Control: ±0.5℃)
  * 
  * @param dev 温控器结构体指针
- * @param new_temp 最新获取的滤波实测温度
+ * @param raw_temp 最新获取的传感器滤波原始温度
  */
-void thermostat_update_temperature(thermostat_dev_t *dev, float new_temp);
+void thermostat_update_temperature(thermostat_dev_t *dev, float raw_temp);
+
+/**
+ * @brief 动态调整温度偏移量 ( Temp Offset ) 并立即重算 current_temp 及更新温控
+ *
+ * @param dev 温控器结构体指针
+ * @param offset 新的温度偏移量 [-2.0, +2.0] ℃
+ */
+void thermostat_set_temp_offset(thermostat_dev_t *dev, float offset);
 
 /**
  * @brief 调整目标设定温度（范围锁在 15.0 ~ 25.0 ℃）

@@ -27,7 +27,9 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     if (!dev) return ESP_ERR_INVALID_ARG;
     dev->heater_gpio = heater_gpio;
     dev->target_temp = 20.0f;   // 默认设定 20.0 摄氏度
-    dev->current_temp = 20.0f;
+    dev->raw_temp = 20.0f;
+    dev->temp_offset = TEMP_OFFSET_DEFAULT;
+    dev->current_temp = dev->raw_temp + dev->temp_offset;
     dev->mode = THERMOSTAT_MODE_STANDBY;
     dev->is_heating = false;
     dev->pending_led_effect = LED_EFFECT_NONE;
@@ -43,11 +45,6 @@ esp_err_t thermostat_init(thermostat_dev_t *dev, gpio_num_t heater_gpio) {
     dev->sleep_timer_setting = SLEEP_TIMER_DEFAULT_MIN;
     dev->sleep_timer_active = false;
     dev->sleep_timer_start_ms = 0;
-
-    // 温度偏移初始化
-    // 首次开机默认 0.0 ℃。若 NVS 中已有记忆值，
-    // 由 thermostat_temp_offset_load() 在启动时覆盖。
-    dev->temp_offset = TEMP_OFFSET_DEFAULT;
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << heater_gpio),
@@ -91,9 +88,10 @@ void thermostat_set_target_temperature(thermostat_dev_t *dev, float target) {
     ESP_LOGI(TAG, "Target temperature set to: %.2f C", dev->target_temp);
 }
 
-void thermostat_update_temperature(thermostat_dev_t *dev, float new_temp) {
+void thermostat_update_temperature(thermostat_dev_t *dev, float raw_temp) {
     if (!dev) return;
-    dev->current_temp = new_temp;
+    dev->raw_temp = raw_temp;
+    dev->current_temp = dev->raw_temp + dev->temp_offset;
 
     // 待机模式或配网模式下不启动加热器
     if (dev->mode != THERMOSTAT_MODE_ON) {
@@ -104,7 +102,7 @@ void thermostat_update_temperature(thermostat_dev_t *dev, float new_temp) {
         return;
     }
 
-    // 迟滞温控逻辑 (Hysteresis Control ±0.5℃)
+    // 迟滞温控逻辑 (Hysteresis Control ±0.5℃)，对补偿后的 current_temp 进行判断
     float high_threshold = dev->target_temp + 0.5f;
     float low_threshold  = dev->target_temp - 0.5f;
 
@@ -113,16 +111,30 @@ void thermostat_update_temperature(thermostat_dev_t *dev, float new_temp) {
         if (dev->current_temp >= high_threshold) {
             dev->is_heating = false;
             gpio_set_level(dev->heater_gpio, 0);
-            ESP_LOGI(TAG, "Temp reached %.2f >= %.2f C, Turning OFF Heater", dev->current_temp, high_threshold);
+            ESP_LOGI(TAG, "Compensated Temp reached %.2f >= %.2f C (Raw: %.2f, Offset: %+.1f), Turning OFF Heater",
+                     dev->current_temp, high_threshold, dev->raw_temp, dev->temp_offset);
         }
     } else {
         // 降温过程中：当实测温度下降至 设定温度 - 0.5 ℃ 时，开启加热
         if (dev->current_temp <= low_threshold) {
             dev->is_heating = true;
             gpio_set_level(dev->heater_gpio, 1);
-            ESP_LOGI(TAG, "Temp dropped to %.2f <= %.2f C, Turning ON Heater", dev->current_temp, low_threshold);
+            ESP_LOGI(TAG, "Compensated Temp dropped to %.2f <= %.2f C (Raw: %.2f, Offset: %+.1f), Turning ON Heater",
+                     dev->current_temp, low_threshold, dev->raw_temp, dev->temp_offset);
         }
     }
+}
+
+void thermostat_set_temp_offset(thermostat_dev_t *dev, float offset) {
+    if (!dev) return;
+    if (offset < TEMP_OFFSET_MIN) offset = TEMP_OFFSET_MIN;
+    if (offset > TEMP_OFFSET_MAX) offset = TEMP_OFFSET_MAX;
+
+    dev->temp_offset = offset;
+    ESP_LOGI(TAG, "Temp Offset set to %+.1f C", dev->temp_offset);
+
+    // 偏移量变动后立即重新计算 current_temp 并触发温控检测
+    thermostat_update_temperature(dev, dev->raw_temp);
 }
 
 void thermostat_factory_reset(thermostat_dev_t *dev) {
@@ -136,9 +148,14 @@ void thermostat_factory_reset(thermostat_dev_t *dev) {
 
     // 恢复默认状态
     dev->target_temp = 20.0f;
-    dev->current_temp = 20.0f;
+    dev->raw_temp = 20.0f;
+    dev->temp_offset = TEMP_OFFSET_DEFAULT;
+    dev->current_temp = dev->raw_temp + dev->temp_offset;
     dev->mode = THERMOSTAT_MODE_STANDBY;
     dev->pairing_start_time_ms = 0;
+
+    // 保存重置后的 offset (0.0℃) 到 NVS
+    thermostat_temp_offset_save(dev);
 
     // 清空 UI 页面状态
     dev->current_page = UI_PAGE_MAIN;
@@ -148,9 +165,6 @@ void thermostat_factory_reset(thermostat_dev_t *dev) {
     dev->sleep_timer_setting = SLEEP_TIMER_DEFAULT_MIN;
     dev->sleep_timer_active = false;
     dev->sleep_timer_start_ms = 0;
-
-    // 清空温度偏移 (恢复默认 0.0 ℃)
-    dev->temp_offset = TEMP_OFFSET_DEFAULT;
 
     // 请求播放恢复出厂灯效
     dev->pending_led_effect = LED_EFFECT_FACTORY_RESET;
@@ -270,7 +284,7 @@ esp_err_t thermostat_temp_offset_load(thermostat_dev_t *dev) {
         return ESP_OK;
     }
 
-    dev->temp_offset = offset;
+    thermostat_set_temp_offset(dev, offset);
     ESP_LOGI(TAG, "Temp Offset loaded from NVS: %.1f C", dev->temp_offset);
     return ESP_OK;
 }
