@@ -377,38 +377,43 @@ static void ui_create_main_page(void) {
     lv_obj_set_style_radius(s_obj_inner_dial, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_all(s_obj_inner_dial, 0, 0);
     lv_obj_clear_flag(s_obj_inner_dial, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_obj_inner_dial, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_obj_inner_dial, LV_SCROLLBAR_MODE_OFF);
 
-    // 2.7 中央当前温度 (整数部分 48 号字 + 小数部分 24 号字，共 3 位有效数字，如 23.5)
-    // 因增加小数显示宽度，整体下移以在表盘内获得更宽的显示位置
+    // 2.7 中央当前温度 (整数部分 48 号字 + 小数部分及度数 24 号字，如 23.5°)
+    // 向上微调字体高度的 1/5 (约 10px，由 Y=4 调整为 Y=-6)
     s_cont_temp = lv_obj_create(s_obj_inner_dial);
-    lv_obj_set_size(s_cont_temp, 92, 48);
+    lv_obj_set_size(s_cont_temp, LV_SIZE_CONTENT, 48);
     lv_obj_set_style_bg_opa(s_cont_temp, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_cont_temp, 0, 0);
     lv_obj_set_style_pad_all(s_cont_temp, 0, 0);
-    lv_obj_align(s_cont_temp, LV_ALIGN_CENTER, 0, 4);
+    lv_obj_set_flex_flow(s_cont_temp, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_cont_temp, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    lv_obj_align(s_cont_temp, LV_ALIGN_CENTER, 0, -6);
     lv_obj_clear_flag(s_cont_temp, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_cont_temp, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_cont_temp, LV_SCROLLBAR_MODE_OFF);
 
     // 整数部分 (如 23)
     s_lbl_current_temp = lv_label_create(s_cont_temp);
     lv_obj_set_style_text_font(s_lbl_current_temp, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(s_lbl_current_temp, lv_color_hex(0xFFFFFF), 0);
     lv_label_set_text(s_lbl_current_temp, "23");
-    lv_obj_align(s_lbl_current_temp, LV_ALIGN_LEFT_MID, 0, 0);
 
-    // 小数部分 (如 .5)，字号为整数部分的一半 (24 号字)，底部对齐以保持基线一致
+    // 小数部分与度数符号 (如 .5°)，字号为 24 号字，底部对齐以保持基线一致
     s_lbl_current_temp_dec = lv_label_create(s_cont_temp);
     lv_obj_set_style_text_font(s_lbl_current_temp_dec, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(s_lbl_current_temp_dec, lv_color_hex(0xFFFFFF), 0);
-    lv_label_set_text(s_lbl_current_temp_dec, ".5");
-    lv_obj_align(s_lbl_current_temp_dec, LV_ALIGN_BOTTOM_LEFT, 56, 0);
+    lv_obj_set_style_pad_bottom(s_lbl_current_temp_dec, 6, 0); // 基线对齐微调
+    lv_label_set_text(s_lbl_current_temp_dec, ".5°");
 
     // 2.8 "ROOM" 标签 (纯白色，加粗/增大至 16 号字，提升对比度与清晰度)
-    // 随温度整体下移，保持与温度之间的相对间距
+    // 随温度同步上移 10px (由 Y=34 调整为 Y=24)，保持相对间距与居中美感
     s_lbl_current_title = lv_label_create(s_obj_inner_dial);
     lv_obj_set_style_text_font(s_lbl_current_title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(s_lbl_current_title, lv_color_hex(0xFFFFFF), 0);
     lv_label_set_text(s_lbl_current_title, "ROOM");
-    lv_obj_align(s_lbl_current_title, LV_ALIGN_CENTER, 0, 34);
+    lv_obj_align(s_lbl_current_title, LV_ALIGN_CENTER, 0, 24);
 
     // 3. 底部状态与操作栏 (Bottom Area) - 纯二维直角设计，彻底消除倒角线彩虹纹
     // 3.1 左侧：Settings 卡片/按钮 (点击行为与物理 FUNC 按键一致，循环切换页面)
@@ -760,13 +765,13 @@ static void ui_update_main_page(void) {
     lv_label_set_text(s_lbl_time, buf);
     ui_update_wifi_symbol();
 
-    // 2. 中央当前温度 (3 位有效数字，整数部分 48 号字 + 小数部分 24 号字，如 23.5)
+    // 2. 中央当前温度 (3 位有效数字，整数部分 48 号字 + 小数部分 24 号字，如 23.5°)
     int cur_int = (int)floorf(s_dev->current_temp);
     int cur_dec = (int)roundf((s_dev->current_temp - cur_int) * 10.0f);
     if (cur_dec >= 10) { cur_dec = 0; cur_int += 1; }
     snprintf(buf, sizeof(buf), "%d", cur_int);
     lv_label_set_text(s_lbl_current_temp, buf);
-    snprintf(buf, sizeof(buf), ".%d", cur_dec);
+    snprintf(buf, sizeof(buf), ".%d°", cur_dec);
     lv_label_set_text(s_lbl_current_temp_dec, buf);
 
     // 3. 当前温度蓝色圆弧进度更新 (15.0 ~ 25.0)
@@ -835,7 +840,7 @@ static void ui_update_standby_page(void) {
     if (cur_dec >= 10) { cur_dec = 0; cur_int += 1; }
     snprintf(buf, sizeof(buf), "%d", cur_int);
     lv_label_set_text(s_lbl_standby_temp, buf);
-    snprintf(buf, sizeof(buf), ".%d", cur_dec);
+    snprintf(buf, sizeof(buf), ".%d°", cur_dec);
     lv_label_set_text(s_lbl_standby_temp_dec, buf);
 
     lv_label_set_text(s_lbl_standby, "STANDBY");
