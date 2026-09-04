@@ -526,6 +526,27 @@ sy = (337 - 345) × 319 / (1815 - 345) = -8 × 319 / 1470 ≈ -1.7
    - **符号**：因 LVGL 8.3 无内置 `LV_SYMBOL_FIRE` 火焰图标，按用户要求使用大写字母 `H` 表示加热状态。
    - **颜色**：不加热时显示黑色，加热时显示红色（`0xFF0000`）。主页面与待机页均同步更新。
 
+### 3.27 Off Timer 设置页面风格与温度传感器校准页面完全统一（已完成）
+根据需求，将 Off Timer 设置页面（`UI_PAGE_SLEEP_TIMER`）由原先的 4 选项滚动选择列表重构为与温度传感器校准页（`UI_PAGE_TEMP_OFFSET`）完全一致的卡片风格：
+
+1. **`components/lcd_display/lcd_display.c`**：
+   - **移除滚动选项框**：移除 `s_sleep_opt_box[4]` 容器及 `s_lbl_sleep_options[4]` 标签与相关滚动宏。
+   - **新增居中大字与提示标签**：新增 `s_lbl_sleep_value`（32 号字白色，居中偏上 `LV_ALIGN_CENTER, 0, -20`）与 `s_lbl_sleep_hint`（16 号字浅灰，居中偏下 `LV_ALIGN_CENTER, 0, 30`）。
+   - **数值与提示格式**：大字显示 `TIMER: %d MIN`（如 `TIMER: 30 MIN`），操作提示显示 `Rotate knob to adjust`。
+   - **显隐与更新逻辑**：`ui_render()`、`ui_update_sleep_timer_page()` 及 `ui_calib_hide_all_normal()` 统一对齐。
+2. **`docs/01_requirements.md`**：同步更新 5.2 节中 Off Timer 页面的 UI 设计描述。
+
+### 3.28 设置页面增加加减触摸按钮 (+ / -) 及避开提示语重叠（已完成）
+根据需求，为所有设置页面（Off Timer 页与温度校准页）在被调整项上方和下方增加大号加减触摸按钮，并调整操作提示语位置：
+
+1. **`components/lcd_display/lcd_display.c`**：
+   - **加减触摸按钮**：新增 `s_btn_adjust_up`（上方 `+` 按钮，尺寸 96×38px，`LV_ALIGN_TOP_MID, 0, 102`）与 `s_btn_adjust_down`（下方 `-` 按钮，尺寸 96×38px，`LV_ALIGN_TOP_MID, 0, 196`），圆角 8px，卡片风格，24 号大字符号。
+   - **触控面积与布局**：宽 96px（接近屏宽 40%），大触控区适合粗手指点按；被调整项数值置于中央（`LV_ALIGN_TOP_MID, 0, 152`）。
+   - **提示语避让重叠**：将操作提示语 `Rotate knob to adjust` 上移至标题栏下方（`LV_ALIGN_TOP_MID, 0, 74`），与 `+` 按钮之间保持 12px 间隙，彻底杜绝重叠。
+   - **交互与旋钮对齐**：点击 `+` 按钮等同于顺时针旋转旋钮一格（Off Timer 切下一档至 90 MIN 停住；Temp Offset 增加 0.5℃ 至 +2.0℃ 停住）；点击 `-` 按钮等同于逆时针旋转旋钮一格（Off Timer 切前一档至 10 MIN 停住；Temp Offset 减少 0.5℃ 至 -2.0℃ 停住）。点击均即时保存至 NVS、刷新显示并重置 60 秒闲置自动退出定时器。
+   - **显隐管理**：仅在 `UI_PAGE_SLEEP_TIMER` 与 `UI_PAGE_TEMP_OFFSET` 设置页显示，主页及待机页自动隐藏。
+2. **`docs/01_requirements.md`**：同步更新设置页交互规范与 UI 布局。
+
 ---
 
 ## 4. 未完成 / 待处理事项
